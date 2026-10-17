@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { saveListing, type ListingForm } from "@/lib/api";
 import { toUnits, usdc } from "@/lib/format";
 import type { Service } from "@/lib/types";
@@ -154,11 +155,16 @@ export function ListingFormCard({
               <Label htmlFor="category" className="text-xs text-muted-foreground">
                 Category
               </Label>
-              <select id="category" className={FIELD} value={form.category} onChange={(e) => set({ category: e.target.value })}>
-                <option value="data">data</option>
-                <option value="inference">inference</option>
-                <option value="scraping">scraping</option>
-              </select>
+              <Select value={form.category} onValueChange={(v) => set({ category: v })}>
+                <SelectTrigger id="category" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="data">data</SelectItem>
+                  <SelectItem value="inference">inference</SelectItem>
+                  <SelectItem value="scraping">scraping</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
           </div>
           <div className="flex flex-col gap-1.5">
@@ -187,10 +193,15 @@ export function ListingFormCard({
               <Label htmlFor="method" className="text-xs text-muted-foreground">
                 Method
               </Label>
-              <select id="method" className={FIELD} value={form.method} onChange={(e) => set({ method: e.target.value as "GET" | "POST" })}>
-                <option value="GET">GET</option>
-                <option value="POST">POST</option>
-              </select>
+              <Select value={form.method} onValueChange={(v) => set({ method: v as "GET" | "POST" })}>
+                <SelectTrigger id="method" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="GET">GET</SelectItem>
+                  <SelectItem value="POST">POST</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="price" className="text-xs text-muted-foreground">

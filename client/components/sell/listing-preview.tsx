@@ -17,6 +17,8 @@ export interface Draft {
   wallet: string;
   inputSchema?: Record<string, unknown>;
   outputSchema?: Record<string, unknown>;
+  /** Set for an agent chain: the sellers it hires. */
+  hires?: string[];
 }
 
 /** Why a typed price can't be listed, or null when it's fine. */
@@ -57,6 +59,7 @@ export function ListingPreview({ draft }: { draft: Draft }) {
     verificationNote: "",
     verifiedAt: null,
     reputation: { attempts: 0, successes: 0, successRate: 0, medianLatencyMs: null, score: 0, isNew: true },
+    chain: draft.hires?.length ? { hires: draft.hires } : null,
   };
 
   return (
@@ -71,7 +74,7 @@ export function ListingPreview({ draft }: { draft: Draft }) {
         <div className="pl-4">
           price <span className="text-primary">{usdc(price)} USDC</span> · {network}
         </div>
-        <div className="pl-4">payTo {short(draft.wallet)} (your wallet)</div>
+        <div className="pl-4">payTo {short(draft.wallet)} ({draft.hires ? "your agent wallet" : "your wallet"})</div>
       </div>
     </div>
   );

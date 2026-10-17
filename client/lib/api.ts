@@ -3,6 +3,9 @@ import type {
   LedgerResponse,
   Run,
   SalesResponse,
+  ChainQuote,
+  ChainStepForm,
+  ChainTestResult,
   Service,
   ServicesResponse,
 } from "./types";
@@ -86,6 +89,23 @@ export interface AgentForm {
 export const saveAgent = (form: AgentForm) => send<Service & { hasKey: boolean }>("POST", "/registry/mine/llm-agents", form);
 export const testAgent = (form: Omit<AgentForm, "name" | "description" | "price"> & { text: string }) =>
   send<{ answer: string; model: string; ms: number }>("POST", "/registry/mine/llm-agents/test", form);
+
+export interface ChainForm {
+  id?: string;
+  name: string;
+  description: string;
+  /** USDC smallest units (6 decimals). */
+  price: string;
+  /** Most one request may spend on its steps, in USDC smallest units. */
+  subBudget: string;
+  steps: ChainStepForm[];
+}
+
+export const saveChain = (form: ChainForm) => send<Service>("POST", "/registry/mine/chains", form);
+export const quoteChain = (form: Omit<ChainForm, "name" | "description">) => send<ChainQuote>("POST", "/registry/mine/chains/quote", form);
+/** Spends real testnet USDC from the agent wallet: the hired sellers are paid for real. */
+export const testChain = (form: Omit<ChainForm, "name" | "description"> & { input: Record<string, unknown> }) =>
+  send<ChainTestResult>("POST", "/registry/mine/chains/test", form);
 
 export const withdrawFromAgent = (amount: string) =>
   send<{ amount_usdc: string; tx_hash: string; explorer: string | null }>("POST", "/agent/withdraw", { amount });

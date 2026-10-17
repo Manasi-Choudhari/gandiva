@@ -2,34 +2,37 @@
 
 import { useState } from "react";
 import useSWR from "swr";
-import { BotIcon, PlugIcon } from "lucide-react";
+import { BotIcon, LinkIcon, PlugIcon } from "lucide-react";
 import { useAuth } from "@/components/auth/auth-provider";
 import { PageIntro } from "@/components/page-intro";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ChainForm } from "@/components/sell/chain-form";
 import { LlmAgentForm } from "@/components/sell/llm-agent-form";
 import { ListingFormCard } from "@/components/sell/listing-form";
 import { MyListings } from "@/components/sell/my-listings";
 import { StakePanel } from "@/components/sell/stake-panel";
 import { fetcher } from "@/lib/api";
-import type { AgentInfo, Service } from "@/lib/types";
+import type { AgentInfo, ChainInfo, Service } from "@/lib/types";
 
-type Template = "endpoint" | "llm";
+type Template = "endpoint" | "llm" | "chain";
 
 const TEMPLATES: { id: Template; title: string; text: string; icon: typeof PlugIcon }[] = [
   { id: "endpoint", title: "Bring your own endpoint", text: "You run a server that answers with an x402 402. List its URL, price and schemas.", icon: PlugIcon },
   { id: "llm", title: "LLM agent (Ollama)", text: "No server needed. Give a model, a system prompt and your Ollama key; we host the paid endpoint.", icon: BotIcon },
+  { id: "chain", title: "Agent chain", text: "No server needed. Pick sellers to hire in order; your agent wallet pays them and keeps the margin.", icon: LinkIcon },
 ];
 
 const verdict = (s: Service) => (s.verification === "verified" ? "402 matches" : s.verification === "mismatch" ? "402 does NOT match" : "endpoint could not be checked");
 
 export default function SellPage() {
   const { address, loading, busy, signIn, error } = useAuth();
-  const { data, mutate } = useSWR<{ address: string; services: Service[]; agents?: Record<string, AgentInfo> }>(address ? "/registry/mine" : null, fetcher);
+  const { data, mutate } = useSWR<{ address: string; services: Service[]; agents?: Record<string, AgentInfo>; chains?: Record<string, ChainInfo> }>(address ? "/registry/mine" : null, fetcher);
   const [template, setTemplate] = useState<Template>("endpoint");
   const [editing, setEditing] = useState<Service | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const agents = data?.agents ?? {};
+  const chains = data?.chains ?? {};
 
   const pick = (t: Template) => {
     setTemplate(t);
@@ -66,7 +69,7 @@ export default function SellPage() {
         </Card>
       ) : (
         <div className="flex flex-col gap-6">
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-3 sm:grid-cols-3">
             {TEMPLATES.map((t) => {
               const active = template === t.id;
               return (
@@ -92,7 +95,7 @@ export default function SellPage() {
 
           <Card>
             <CardHeader>
-              <CardTitle>{editing ? `Edit ${editing.name}` : template === "llm" ? "List an LLM agent" : "List a seller"}</CardTitle>
+              <CardTitle>{editing ? `Edit ${editing.name}` : template === "llm" ? "List an LLM agent" : template === "chain" ? "List an agent chain" : "List a seller"}</CardTitle>
             </CardHeader>
             <CardContent>
               {template === "llm" ? (
@@ -102,6 +105,15 @@ export default function SellPage() {
                   wallet={address}
                   editing={editing}
                   info={editing ? agents[editing.id] : undefined}
+                  onCancel={() => setEditing(null)}
+                  onSaved={done}
+                />
+              ) : template === "chain" ? (
+                <ChainForm
+                  key={`chain:${editing?.id ?? "new"}`}
+                  wallet={address}
+                  editing={editing}
+                  info={editing ? chains[editing.id] : undefined}
                   onCancel={() => setEditing(null)}
                   onSaved={done}
                 />
@@ -129,9 +141,10 @@ export default function SellPage() {
               <MyListings
                 services={data?.services ?? []}
                 agents={agents}
+                chains={chains}
                 onEdit={(s) => {
                   setSaved(null);
-                  setTemplate(agents[s.id] ? "llm" : "endpoint");
+                  setTemplate(chains[s.id] ? "chain" : agents[s.id] ? "llm" : "endpoint");
                   setEditing(s);
                   window.scrollTo({ top: 0, behavior: "smooth" });
                 }}

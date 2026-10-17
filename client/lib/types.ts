@@ -37,6 +37,8 @@ export interface Service {
   reputation: Reputation;
   /** Summary of the no-KYC credibility checks; null until the server has scored the listing. */
   credibility?: { score: number; level: CredibilityLevel } | null;
+  /** Set when this listing is an agent chain: the sellers it hires and pays to do the job. */
+  chain?: { hires: string[] } | null;
 }
 
 export type CredibilityLevel = "high" | "medium" | "low" | "unproven";
@@ -302,6 +304,55 @@ export interface SalesResponse {
 }
 
 /** Settings of a Sell-tab LLM agent. The API key itself is never sent to the browser. */
+/** The parts of a JSON Schema the Sell tab reads. */
+export interface JsonSchema {
+  type?: string | string[];
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
+  items?: JsonSchema;
+  description?: string;
+  [key: string]: unknown;
+}
+
+/** Where one input field of a chain step comes from. */
+export type ChainSource = { from: "buyer"; field: string } | { from: "fixed"; value: unknown } | { from: "step"; step: number; field: string };
+
+export interface ChainStepForm {
+  serviceId: string;
+  input: Record<string, ChainSource>;
+}
+
+/** What the Sell tab gets back about one of the wallet's agent chains. */
+export interface ChainInfo {
+  steps: ChainStepForm[];
+  /** USDC smallest units. */
+  subBudget: string;
+  hires: string[];
+}
+
+export interface ChainQuote {
+  steps: { serviceId: string; name: string; category: Category; price: string }[];
+  /** All amounts in USDC smallest units. */
+  cost: string;
+  subBudget: string;
+  price: string;
+  margin: string;
+  category: Category;
+  inputSchema: JsonSchema;
+  outputSchema: JsonSchema;
+  agentWallet: { address: string; balance: string | null; enough: boolean | null };
+}
+
+export interface ChainTestResult {
+  output: {
+    result: unknown;
+    steps: { service: string; output: unknown }[];
+    hired: { service: string; category: string; status: string; paid: string; tx_hash?: string }[];
+    cost_units: string;
+  };
+  ms: number;
+}
+
 export interface AgentInfo {
   host: string;
   model: string;

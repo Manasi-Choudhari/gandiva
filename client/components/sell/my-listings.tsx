@@ -6,16 +6,18 @@ import { Button } from "@/components/ui/button";
 import { CategoryBadge } from "@/components/status-badge";
 import { usdc } from "@/lib/format";
 import { deleteListing } from "@/lib/api";
-import type { AgentInfo, Service } from "@/lib/types";
+import type { AgentInfo, ChainInfo, Service } from "@/lib/types";
 
 export function MyListings({
   services,
   agents,
+  chains,
   onEdit,
   onChanged,
 }: {
   services: Service[];
   agents: Record<string, AgentInfo>;
+  chains: Record<string, ChainInfo>;
   onEdit: (s: Service) => void;
   onChanged: () => void;
 }) {
@@ -48,6 +50,9 @@ export function MyListings({
             <CategoryBadge category={s.category} />
             {agents[s.id] ? (
               <span className="rounded bg-primary/15 px-1.5 py-0.5 font-mono text-[10px] text-primary">LLM agent · {agents[s.id].model}</span>
+            ) : null}
+            {chains[s.id] ? (
+              <span className="rounded bg-primary/15 px-1.5 py-0.5 font-mono text-[10px] text-primary">agent chain · {chains[s.id].hires.join(" → ")}</span>
             ) : null}
             <span className="font-mono text-sm text-primary">{usdc(s.price)} USDC / call</span>
             <span className="ml-auto flex gap-1">

@@ -134,6 +134,21 @@ All paid calls go through one scheduler (`src/x402/scheduler.ts`):
 - **Where to see it:** the Run page shows queued calls and recent contention decisions, and `GET /buyer/queue` returns the same data.
 - **Budgets:** these rules decide the order of payments. The guarantee that spending never passes the budget still comes from the per-run budget reservations.
 
+## Deploying (Render API + Vercel UI)
+
+The API (registry, sellers, buyer, ledger) is one Docker service; the Next.js UI is a separate Vercel project that proxies to it.
+
+1. **Render**: New > Blueprint, pick this repo (`render.yaml`). Fill the secret env vars (see `.env.example`: `BUYER_PRIVATE_KEY`, `SECRETS_KEY`, `PAYTO_*`, `TRAVEL_BRIEF_KEY`, `OLLAMA_API_KEY`, `ADMIN_TOKEN`, `BUYER_TOKEN`). Set `PUBLIC_BASE_URL` to the service's own URL (e.g. `https://gandiva-api.onrender.com`) and redeploy once it is known.
+2. **Vercel**: import the repo, set the root directory to `client/`, and set `API_URL` to the Render URL. Nothing else is needed; the client reads no other env vars.
+3. **Check**: `<render-url>/healthz`, `<render-url>/registry/services`, then sign in and run a task from the Vercel URL.
+
+Things to know:
+
+- **The free Render plan has no disk.** `data/gandiva.db` (ledger, registry, users, agent wallets) is wiped on every restart or deploy. Deploy by hand (auto-deploy is off), never mid-judging, and use a freshly funded buyer wallet for a run you want to reconcile.
+- **The free plan sleeps after 15 idle minutes.** Point an uptime pinger (e.g. UptimeRobot) at `/healthz` every 5 minutes.
+- Every registry listing and 402 `resource.url` is built from `PUBLIC_BASE_URL`, so sellers are reached on the Render URL directly, not through Vercel.
+- Local image check: `docker build -t gandiva-api .`
+
 ## License
 
 ISC

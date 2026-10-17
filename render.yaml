@@ -1,0 +1,62 @@
+# Render blueprint for the Gandiva API (backend only). The UI lives on Vercel and proxies to this service.
+# The free plan has no persistent disk: data/gandiva.db (ledger, registry, users) is wiped on every restart or deploy.
+services:
+  - type: web
+    name: gandiva-api
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    autoDeployTrigger: off # a deploy wipes the ledger, so deploy by hand and never during judging
+    envVars:
+      # Public URL of THIS service, e.g. https://gandiva-api.onrender.com. Every registry listing and 402 resource URL is built from it.
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: BUYER_PRIVATE_KEY
+        sync: false
+      - key: SECRETS_KEY
+        sync: false
+      - key: OLLAMA_API_KEY
+        sync: false
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: BUYER_TOKEN
+        sync: false
+      - key: TRAVEL_BRIEF_KEY
+        sync: false
+      - key: PAYTO_SHELF_SCRAPER
+        sync: false
+      - key: PAYTO_CHEAP_SCRAPER
+        sync: false
+      - key: PAYTO_FX_RATES
+        sync: false
+      - key: PAYTO_HINDI_SUMMARY
+        sync: false
+      - key: PAYTO_CITY_INFO
+        sync: false
+      - key: PAYTO_SENTIMENT
+        sync: false
+      - key: PAYTO_JUNK_FX
+        sync: false
+      - key: PAYTO_MIRROR_SCRAPER
+        sync: false
+      - key: PAYTO_ATTACKER
+        sync: false
+      - key: PAYTO_TRAVEL_BRIEF
+        sync: false
+      # Optional: SellerStake (deploy the contract first with `npm run stake:deploy`)
+      - key: STAKE_CONTRACT
+        sync: false
+      - key: ARBITER_PRIVATE_KEY
+        sync: false
+      - key: FACILITATOR_URL
+        value: https://x402.org/facilitator
+      - key: BASE_SEPOLIA_RPC
+        value: https://sepolia.base.org
+      - key: OLLAMA_HOST
+        value: https://ollama.com
+      - key: OLLAMA_MODEL
+        value: gpt-oss:20b
+      - key: SPEND_CAP_USDC
+        value: "0.5"
+      - key: SEED_ADVERSARIAL
+        value: "true"

@@ -1,0 +1,17 @@
+.git
+.claude
+.env
+.env.*
+node_modules
+client
+data
+tests
+scripts
+tools
+*.db
+*.db-*
+*.log
+REVIEW.md
+TEST-GUIDE.md
+Dockerfile
+.dockerignore

@@ -114,12 +114,17 @@ function OutputValue({ value }: { value: unknown }) {
   );
 }
 
+/** The model sometimes answers in markdown; show **bold** as bold instead of literal asterisks. */
+function Inline({ text }: { text: string }) {
+  return text.split(/\*\*(.+?)\*\*/g).map((part, i) => (i % 2 ? <strong key={i}>{part}</strong> : part));
+}
+
 function AgentResultView({ result }: { result: AgentResult }) {
   const outputs = Object.entries(result.outputs ?? {});
   return (
     <div className="flex flex-col gap-5">
       <p className="whitespace-pre-wrap rounded-xl border border-border bg-card/40 p-4 text-sm leading-relaxed">
-        {result.answer}
+        <Inline text={result.answer} />
       </p>
       {outputs.map(([key, value]) => (
         <section key={key} className="flex flex-col gap-2">

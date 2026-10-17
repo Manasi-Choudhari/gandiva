@@ -5,6 +5,9 @@ import { ZodError } from "zod";
 import { currentUser } from "../auth/routes.js";
 import { config, EXPLORER_TX, fromUnits } from "../config.js";
 import { listWithdrawals } from "../agents/wallet.js";
+import { chainInfo, listChainsFor } from "../chains/chains.js";
+import { chainRoutes } from "../chains/routes.js";
+import { isChainService } from "../chains/store.js";
 import { listHostedFor } from "../hosted/agents.js";
 import { hostedRoutes } from "../hosted/routes.js";
 import { collectSales, sellerPorts } from "../sellers/supervisor.js";
@@ -13,7 +16,7 @@ import { endpointBlockedReason, verifyService } from "./probe.js";
 import { groupServices } from "../buyer/catalogue.js";
 import { stakeOf } from "../stake/index.js";
 import { credibilityCached, credibilityFor, ProofError, proofMessage, submitPayToProof } from "./credibility.js";
-import { deleteOwnedService, deleteService, explainRank, getService, listByOwner, listLedger, listSales, recentCalls, RegistryError, registerExternal, registerForWallet, reputationFor, searchServices } from "./store.js";
+import { deleteOwnedService, deleteService, explainRank, getService, listByOwner, listLedger, listSales, recentCalls, RegistryError, registerExternal, registerForWallet, reputationFor, searchServices, slug } from "./store.js";
 
 export const registry = new Hono();
 
@@ -24,7 +27,7 @@ registry.get("/services", (c) => {
   return c.json({
     services: searchServices({ category, maxPrice, sort }).map((s) => {
       const cred = credibilityCached(s.id);
-      return { ...s, credibility: cred ? { score: cred.score, level: cred.level } : null };
+      return { ...s, credibility: cred ? { score: cred.score, level: cred.level } : null, chain: chainInfo(s.id) };
     }),
   });
 });
@@ -148,10 +151,11 @@ const signedIn = (c: Context) => currentUser(c);
 registry.get("/mine", (c) => {
   const me = signedIn(c);
   if (!me) return c.json({ error: "sign in with your wallet first" }, 401);
-  return c.json({ address: me, services: listByOwner(me).map((s) => ({ ...s, reputation: reputationFor(s.id) })), agents: listHostedFor(me) });
+  return c.json({ address: me, services: listByOwner(me).map((s) => ({ ...s, reputation: reputationFor(s.id) })), agents: listHostedFor(me), chains: listChainsFor(me) });
 });
 
 registry.route("/mine/llm-agents", hostedRoutes);
+registry.route("/mine/chains", chainRoutes);
 registry.route("/stake", stakeRoutes);
 
 registry.post(
@@ -164,6 +168,8 @@ registry.post(
       const body = await c.req.json();
       const blocked = typeof body?.endpoint === "string" ? await endpointBlockedReason(body.endpoint) : null;
       if (blocked) return c.json({ error: blocked }, 400);
+      const id = typeof body?.id === "string" ? body.id : typeof body?.name === "string" ? slug(body.name) : "";
+      if (id && isChainService(id)) return c.json({ error: `"${id}" is one of your agent chains; edit it with the agent chain form` }, 409);
       const listed = registerForWallet(body, me);
       await verifyService(listed);
       return c.json(getService(listed.id), 201);

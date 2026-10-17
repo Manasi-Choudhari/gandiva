@@ -88,6 +88,15 @@ CREATE TABLE IF NOT EXISTS hosted_sellers (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Sell-tab "agent chain" listings: the fixed steps (which sellers to hire, in order, and where each input comes from).
+CREATE TABLE IF NOT EXISTS chain_sellers (
+  service_id TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  steps_json TEXT NOT NULL,
+  sub_budget TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Money the user took back out of their agent wallet (outgoing transfers that are not payments to sellers; reconcile subtracts them).
 CREATE TABLE IF NOT EXISTS withdrawals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

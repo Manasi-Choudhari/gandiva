@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { config } from "../config.js";
+import { chainRoute } from "../chains/chains.js";
 import { hostedRoute } from "../hosted/agents.js";
 import { chat } from "../llm.js";
 import { upsertService, type Category, type ServiceInput } from "../registry/store.js";
@@ -267,6 +268,8 @@ export function buildSellers(remote: ReadonlyMap<string, number> = new Map()): {
   const app = new Hono();
   // Sell-tab "LLM agent" listings: one paid route for all of them, built from each agent's stored settings.
   app.post("/u/:id/ask", hostedRoute);
+  // Sell-tab "agent chain" listings: one paid route for all of them, built from each chain's stored steps.
+  app.post("/c/:id/run", chainRoute);
   const active = activeSellerDefs();
   for (const def of active) {
     const port = remote.get(def.id);

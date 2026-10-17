@@ -140,12 +140,13 @@ export const walletOwner = (address: string) => `wallet:${address.toLowerCase()}
 const isWalletOwner = (owner: string) => owner.startsWith("wallet:");
 
 /**
- * Listing made by a signed-in wallet (Sell tab). Earnings always go to that wallet (payTo is forced), and only that wallet
- * can change or remove the listing again. Posting an id that already belongs to this wallet updates it.
+ * Listing made by a signed-in wallet (Sell tab). Earnings go to that wallet (payTo is forced; only server code may pass
+ * `payTo`, e.g. an agent chain paid into the owner's agent wallet), and only that wallet can change or remove the listing
+ * again. Posting an id that already belongs to this wallet updates it.
  */
-export function registerForWallet(input: unknown, wallet: string): Service {
+export function registerForWallet(input: unknown, wallet: string, opts: { payTo?: string } = {}): Service {
   const owner = walletOwner(wallet);
-  const s = serviceInput.parse({ ...(input as object), payTo: wallet, owner });
+  const s = serviceInput.parse({ ...(input as object), payTo: opts.payTo ?? wallet, owner });
   const id = s.id ?? slug(s.name);
   if (!/^[a-z0-9-]{2,64}$/.test(id)) throw new RegistryError("name must contain letters or numbers (the listing id is made from it)", 409);
   const existing = getService(id);
@@ -175,6 +176,7 @@ export function deleteOwnedService(id: string, wallet: string): "deleted" | "not
 
 export function deleteService(id: string) {
   db.prepare("DELETE FROM hosted_sellers WHERE service_id = ?").run(id);
+  db.prepare("DELETE FROM chain_sellers WHERE service_id = ?").run(id);
   return db.prepare("DELETE FROM services WHERE id = ?").run(id).changes > 0;
 }
 

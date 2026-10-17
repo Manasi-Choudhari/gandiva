@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { privateKeyToAccount } from "viem/accounts";
 import { usdcBalance } from "../agents/wallet.js";
+import { isChainService } from "../chains/store.js";
 import { canonical } from "../buyer/catalogue.js";
 import { buyFrom, Ctx, type BuyOutcome, type PayFn, type RunState } from "../buyer/purchase.js";
 import { config, fromUnits, toUnits } from "../config.js";
@@ -85,10 +86,10 @@ const POOLS: Record<"weather" | "fx" | "hindi", { category: Category; key: strin
   hindi: { category: "inference", key: canonical(["inference", summariseInput, summariseOutput]) },
 };
 
-/** Ranked suppliers for one job: never this agent itself, and only listings whose real 402 matched what they advertise. */
+/** Ranked suppliers for one job: never this agent itself or another chain, and only listings whose real 402 matched what they advertise. */
 export function suppliers(all: ServiceWithReputation[], job: keyof typeof POOLS): ServiceWithReputation[] {
   const { category, key } = POOLS[job];
-  return all.filter((s) => s.id !== BRIEF_ID && s.verification === "verified" && s.category === category && canonical([s.category, s.inputSchema, s.outputSchema]) === key);
+  return all.filter((s) => s.id !== BRIEF_ID && !isChainService(s.id) && s.verification === "verified" && s.category === category && canonical([s.category, s.inputSchema, s.outputSchema]) === key);
 }
 
 export interface BriefDeps {

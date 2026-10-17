@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { CredibilityBadge } from "./credibility-badge";
 import { CategoryBadge } from "@/components/status-badge";
 import { AddrLink } from "@/components/tx-link";
-import { ADVERSARIAL_IDS, CHAIN_IDS, pct, usdc } from "@/lib/format";
+import { ADVERSARIAL_IDS, pct, usdc } from "@/lib/format";
 import type { Service } from "@/lib/types";
 import { spring, transition } from "@/lib/motion";
 import { cn } from "cn";
@@ -152,10 +152,10 @@ export function ServiceCard({
             </div>
           ) : null}
 
-          {CHAIN_IDS.has(service.id) ? (
+          {service.chain ? (
             <div className="flex items-start gap-1.5 rounded-md border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] text-primary">
               <LinkIcon className="mt-0.5 size-3 shrink-0" />
-              <span>agent chain — pays other sellers (weather, FX, Hindi) from its own wallet to do the job</span>
+              <span>agent chain — hires {service.chain.hires.length ? service.chain.hires.join(", ") : "other sellers"} and pays them from its own wallet to do the job</span>
             </div>
           ) : null}
 

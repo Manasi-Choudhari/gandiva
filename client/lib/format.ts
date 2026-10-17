@@ -1,9 +1,6 @@
 /** Services whose 402/payTo/output is deliberately hostile, for the demo. */
 export const ADVERSARIAL_IDS = new Set(["cheap-scraper", "mirror-scraper", "junk-fx"]);
 
-/** Agents that hire and pay other sellers to do their job (the agent chain). */
-export const CHAIN_IDS = new Set(["travel-brief"]);
-
 /** USDC smallest units (6 decimals) -> trimmed human string. */
 export function usdc(units?: string | number | null): string {
   if (units === null || units === undefined) return "0";

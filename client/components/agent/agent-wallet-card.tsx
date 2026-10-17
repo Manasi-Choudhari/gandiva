@@ -28,6 +28,7 @@ export function AgentWalletCard() {
   const { data: info } = useInfo();
   const { data: agent, error, mutate } = useAgentWallet(Boolean(address));
   const [amount, setAmount] = useState("0.1");
+  const [withdrawAmount, setWithdrawAmount] = useState("");
   const [working, setWorking] = useState<"fund" | "withdraw" | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [copied, setCopied] = useState(false);
@@ -79,12 +80,15 @@ export function AgentWalletCard() {
     }
   }
 
-  async function withdraw() {
-    if (!window.confirm("Send everything in your agent wallet back to your own wallet?")) return;
+  async function withdraw(all: boolean) {
+    const units = all ? "all" : toUnits(withdrawAmount);
+    if (!units || units === "0") return setNotice({ tone: "bad", text: "Enter an amount like 0.05 (USDC) to withdraw." });
+    if (!all && Number(units) > Math.round(balance)) return setNotice({ tone: "bad", text: "Your agent wallet holds less than that." });
+    if (all && !window.confirm("Send everything in your agent wallet back to your own wallet?")) return;
     setWorking("withdraw");
     setNotice(null);
     try {
-      const w = await withdrawFromAgent("all");
+      const w = await withdrawFromAgent(units);
       await mutate();
       setNotice({ tone: "ok", text: `${w.amount_usdc} USDC is on its way back to your wallet.`, href: w.explorer });
     } catch (e) {
@@ -149,8 +153,20 @@ export function AgentWalletCard() {
               <Button onClick={fund} disabled={working !== null}>
                 {working === "fund" ? "Confirm in your wallet…" : "Send from my wallet"}
               </Button>
-              <Button variant="outline" onClick={withdraw} disabled={working !== null || balance === 0}>
-                {working === "withdraw" ? "Withdrawing…" : "Withdraw all"}
+            </div>
+
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="withdraw-amount" className="text-xs text-muted-foreground">
+                  Withdraw (USDC)
+                </Label>
+                <Input id="withdraw-amount" inputMode="decimal" placeholder="0.05" className="w-28 font-mono" value={withdrawAmount} onChange={(e) => setWithdrawAmount(e.target.value)} />
+              </div>
+              <Button variant="outline" onClick={() => withdraw(false)} disabled={working !== null || balance === 0 || !withdrawAmount.trim()}>
+                {working === "withdraw" ? "Withdrawing…" : "Withdraw"}
+              </Button>
+              <Button variant="outline" onClick={() => withdraw(true)} disabled={working !== null || balance === 0}>
+                Withdraw all
               </Button>
             </div>
 

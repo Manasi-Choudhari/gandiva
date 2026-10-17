@@ -25,6 +25,8 @@ const nextConfig: NextConfig = {
   async rewrites() {
     return [
       { source: "/auth/:path*", destination: `${API_URL}/auth/:path*` },
+      // Vercel does not match the bare /agent against /agent/:path*, so it gets its own rule.
+      { source: "/agent", destination: `${API_URL}/agent` },
       { source: "/agent/:path*", destination: `${API_URL}/agent/:path*` },
       { source: "/mcp", destination: `${API_URL}/mcp` },
       { source: "/registry/:path*", destination: `${API_URL}/registry/:path*` },

@@ -166,6 +166,14 @@ describe("agent wallet routes", () => {
 describe("withdraw: gasless transfer back to the owner", () => {
   const ok = (tx = "0x" + "ab".repeat(32)) => ({ settle: vi.fn(async () => ({ success: true, transaction: tx, network: NETWORK, payer: "0x" })) });
 
+  it("can withdraw more than the x402 library's default $1-per-payment cap", async () => {
+    const settler = ok();
+    const w = await wallet.withdraw(alice.address, 1_500_000n, { settler: settler as any, balance: async () => 25_000_000n });
+    expect(w).toMatchObject({ status: "settled", amount: "1500000" });
+    const all = await wallet.withdraw(alice.address, "all", { settler: settler as any, balance: async () => 25_000_000n });
+    expect(all).toMatchObject({ status: "settled", amount: "25000000" });
+  });
+
   it("signs an exact payment from the agent wallet to the owner and records it", async () => {
     const settler = ok();
     const w = await wallet.withdraw(alice.address, 400_000n, { settler: settler as any, balance: async () => 1_000_000n });
@@ -304,7 +312,7 @@ describe("withdrawals of unknown outcome", () => {
 
   it("a signing error is recorded as failed (nothing left the server), not unknown", async () => {
     const payer = wallet.getAgentPayer(alice.address);
-    vi.spyOn(payer, "sign").mockRejectedValueOnce(new Error("bad key"));
+    vi.spyOn(payer, "signWithdrawal").mockRejectedValueOnce(new Error("bad key"));
     const settler = dies();
     await expect(wallet.withdraw(alice.address, 1000n, { settler: settler as any, balance: async () => 5000n })).rejects.toThrow(/Nothing was moved/);
     expect(settler.settle).not.toHaveBeenCalled();

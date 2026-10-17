@@ -91,6 +91,7 @@ export type OnCallPhase = (phase: CallPhase, asked?: bigint) => void;
 export class SafePayer {
   readonly account: PrivateKeyAccount;
   private client: x402Client;
+  private withdrawalClient: x402Client;
 
   /** `cap` is the spend cap this wallet answers to; the default is the shared demo wallet's. */
   constructor(
@@ -100,6 +101,10 @@ export class SafePayer {
     this.account = privateKeyToAccount(privateKey);
     this.client = new x402Client();
     registerExactEvmScheme(this.client, { signer: this.account, networks: [NETWORK] });
+    // Purchases keep the x402 library's default cap per payment. A withdrawal is built by our own code and always pays the
+    // signed-in owner, so only it may exceed that cap.
+    this.withdrawalClient = new x402Client().setSpendControls({ maxAmountPerPayment: false });
+    registerExactEvmScheme(this.withdrawalClient, { signer: this.account, networks: [NETWORK] });
   }
 
   get address() {
@@ -109,6 +114,11 @@ export class SafePayer {
   /** Signs a payment for the given 402 terms with this wallet (no network call, nothing is moved until someone settles it). */
   sign(pr: PaymentRequired) {
     return this.client.createPaymentPayload(pr);
+  }
+
+  /** Like sign(), for paying the owner back out of the wallet: the library's per-payment cap does not apply. */
+  signWithdrawal(pr: PaymentRequired) {
+    return this.withdrawalClient.createPaymentPayload(pr);
   }
 
   async call(

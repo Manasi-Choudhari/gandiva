@@ -150,7 +150,7 @@ export async function withdraw(user: string, amount: bigint | "all", deps: { set
 
     let payload: PaymentPayload;
     try {
-      payload = await payer.sign(required);
+      payload = await payer.signWithdrawal(required);
     } catch (err: any) {
       // Nothing was signed, so nothing can move.
       record("failed", null, `could not sign: ${String(err?.message ?? err).slice(0, 280)}`);

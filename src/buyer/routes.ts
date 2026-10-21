@@ -60,11 +60,18 @@ buyer.post("/run", async (c) => {
 /** Priority scheduler state: weights, busy slots, calls waiting right now and recent contention decisions. */
 buyer.get("/queue", (c) => c.json(scheduler.status()));
 
-buyer.get("/runs", (c) => c.json({ runs: listRuns().map(({ id, task, state, startedAt, spent, budget }) => ({ id, task, state, startedAt, spent, budget })) }));
+// A run holds the task and its results. A signed-in user's run is theirs alone; a run paid from the shared demo wallet
+// stays readable by its id (its purchases, run id included, are on the public ledger anyway).
+buyer.get("/runs", (c) => {
+  const user = currentUser(c);
+  return c.json({ runs: user ? listRuns(user).map(({ id, task, state, startedAt, spent, budget }) => ({ id, task, state, startedAt, spent, budget })) : [] });
+});
 
 buyer.get("/runs/:id", (c) => {
   const run = getRun(c.req.param("id"));
-  return run ? c.json(run) : c.json({ error: "run not found" }, 404);
+  // Someone else's run answers exactly like a missing one.
+  if (!run || (run.owner && run.owner !== currentUser(c))) return c.json({ error: "run not found" }, 404);
+  return c.json(run);
 });
 
 buyer.post("/buy", async (c) => {

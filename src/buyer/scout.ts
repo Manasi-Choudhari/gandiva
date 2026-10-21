@@ -35,7 +35,11 @@ export const getRun = (id: string) => runs.get(id);
 
 /** Does this user have a paying run in progress? (A withdrawal must wait for it.) */
 export const hasActiveRun = (owner: string) => [...runs.values()].some((r) => r.owner === owner.toLowerCase() && r.state === "running" && !r.dryRun);
-export const listRuns = () => [...runs.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, 50);
+export const listRuns = (owner: string) =>
+  [...runs.values()]
+    .filter((r) => r.owner === owner.toLowerCase())
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+    .slice(0, 50);
 
 // The shared demo wallet pays for anonymous runs, judge calls and the CLI; a signed-in user's run pays with their own agent wallet.
 const payWith = (payer: SafePayer) => (...args: Parameters<SafePayer["call"]>) => payer.call(...args);

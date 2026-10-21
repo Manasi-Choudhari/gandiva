@@ -1,6 +1,7 @@
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { toUnits } from "../config.js";
+import { clientIp } from "../http/clientIp.js";
 import { listServices } from "../registry/store.js";
 import { addRebuttal, addSignature, claimSummary, listClaims, slashedTotal } from "./claims.js";
 import { getEvidence } from "./evidence.js";
@@ -35,8 +36,6 @@ function overLimit(key: string, max: number, now = Date.now()) {
   hits.set(key, [...recent, now]);
   return false;
 }
-// The right-most X-Forwarded-For entry is the one our host's proxy added; the left ones are whatever the client sent.
-const clientIp = (c: Context) => c.req.header("x-forwarded-for")?.split(",").pop()?.trim() || "direct";
 const LIMITS = { relay: { ip: 60, address: 10 }, signature: { ip: 600, address: 0 }, rebuttal: { ip: 20, address: 0 } } as const;
 function limited(c: Context, scope: keyof typeof LIMITS, address?: string) {
   const l = LIMITS[scope];

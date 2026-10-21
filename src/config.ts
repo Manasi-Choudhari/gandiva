@@ -30,6 +30,10 @@ export const config = {
       .map((o) => o.trim().replace(/\/$/, ""))
       .filter(Boolean);
   },
+  // Shared with the UI's proxy (client/proxy.ts) so its visitor-IP header can be trusted; unset = never trusted.
+  get proxySecret() {
+    return env("PROXY_SECRET");
+  },
   facilitatorUrl: env("FACILITATOR_URL", "https://x402.org/facilitator"),
   rpcUrl: env("BASE_SEPOLIA_RPC", "https://sepolia.base.org"),
   buyerPrivateKey: env("BUYER_PRIVATE_KEY") as `0x${string}` | "",

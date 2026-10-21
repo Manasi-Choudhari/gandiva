@@ -31,6 +31,9 @@ services:
         sync: false
       - key: ADMIN_TOKEN
         sync: false
+      # Same value as PROXY_SECRET on Vercel, so the API can trust the visitor IP the UI forwards (per-visitor rate limits).
+      - key: PROXY_SECRET
+        sync: false
       - key: BUYER_TOKEN
         sync: false
       - key: TRAVEL_BRIEF_KEY

@@ -5,6 +5,7 @@ import { config, NETWORK, USDC_ADDRESS } from "./config.js";
 import { agent } from "./agents/routes.js";
 import { auth } from "./auth/routes.js";
 import { buyer } from "./buyer/routes.js";
+import { requestSizeLimit } from "./http/bodyLimit.js";
 import { rateLimit } from "./http/rateLimit.js";
 import { getPayer } from "./buyer/scout.js";
 import { llmAvailable } from "./llm.js";
@@ -23,6 +24,7 @@ import { spendCap } from "./x402/spendCap.js";
 const app = new Hono();
 app.use("*", cors({ origin: "*", exposeHeaders: ["PAYMENT-REQUIRED", "PAYMENT-RESPONSE"] }));
 app.use("*", rateLimit());
+app.use("*", requestSizeLimit());
 app.onError((err, c) => {
   console.error(`[error] ${c.req.method} ${c.req.path}: ${err.message}`);
   return c.json({ error: "internal error" }, 500);

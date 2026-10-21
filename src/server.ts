@@ -8,7 +8,7 @@ import { requestSizeLimit } from "./http/bodyLimit.js";
 import { corsPolicy, sameSiteWrites } from "./http/cors.js";
 import { apiSecurityHeaders, privateNoStore } from "./http/headers.js";
 import { rateLimit } from "./http/rateLimit.js";
-import { getPayer } from "./buyer/scout.js";
+import { getPayer, markInterruptedRuns } from "./buyer/scout.js";
 import { llmAvailable } from "./llm.js";
 import { mcp } from "./mcp/server.js";
 import { startCredibilityRefresh } from "./registry/credibility.js";
@@ -65,6 +65,7 @@ app.get("/api/info", async (c) => {
 app.get("/healthz", (c) => c.json({ ok: true }));
 
 seedRegistry(active);
+markInterruptedRuns();
 startResolver();
 startClaimWorker();
 serve({ fetch: app.fetch, port: config.port }, () => {

@@ -281,7 +281,8 @@ export type RunStateName =
   | "completed"
   | "partial"
   | "needs_more_budget"
-  | "failed";
+  | "failed"
+  | "interrupted";
 
 export interface Run {
   id: string;

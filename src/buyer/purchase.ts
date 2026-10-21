@@ -62,7 +62,7 @@ export interface RunState {
   task: string;
   budget: string;
   maxConcurrency: number;
-  state: "running" | "completed" | "partial" | "needs_more_budget" | "failed";
+  state: "running" | "completed" | "partial" | "needs_more_budget" | "failed" | "interrupted";
   /** agent = the LLM plans in rounds; legacy = the built-in books pipeline (used as a fallback). */
   mode: "agent" | "legacy";
   dryRun: boolean;

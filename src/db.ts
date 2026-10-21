@@ -74,7 +74,11 @@ CREATE TABLE IF NOT EXISTS runs (
   ts TEXT NOT NULL,
   task TEXT NOT NULL,
   budget TEXT NOT NULL,
-  result TEXT
+  result TEXT,
+  state TEXT,
+  owner TEXT,
+  finished_at TEXT,
+  run_json TEXT
 );
 
 -- Sell-tab "LLM agent" listings: the seller's model settings. The API key is stored encrypted (see src/crypto/secrets.ts).
@@ -214,10 +218,22 @@ if (/CHECK\s*\(status IN/i.test(ledgerSql)) {
   `);
 }
 
+// Migrate databases created before runs outlived a restart: add the run's state, owner and whole saved state.
+const runColumns = (db.prepare("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name);
+if (!runColumns.includes("run_json")) {
+  db.exec(`
+    ALTER TABLE runs ADD COLUMN state TEXT;
+    ALTER TABLE runs ADD COLUMN owner TEXT;
+    ALTER TABLE runs ADD COLUMN finished_at TEXT;
+    ALTER TABLE runs ADD COLUMN run_json TEXT;
+  `);
+}
+
 // Reputation reads every row of a listing on each marketplace request, the spend cap every row of a wallet on each payment,
 // and chains count a payer's failed settlements. Created after the ledger rebuild above so they land on the final table.
 db.exec(`
 CREATE INDEX IF NOT EXISTS idx_ledger_service ON ledger (service_id, id);
 CREATE INDEX IF NOT EXISTS idx_ledger_buyer_ts ON ledger (lower(buyer), ts);
 CREATE INDEX IF NOT EXISTS idx_sales_seller_payer ON sales (seller, lower(payer));
+CREATE INDEX IF NOT EXISTS idx_runs_owner_ts ON runs (owner, ts);
 `);

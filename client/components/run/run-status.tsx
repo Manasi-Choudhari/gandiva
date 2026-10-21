@@ -14,6 +14,7 @@ const STATE_TONE: Record<RunStateName, string> = {
   partial: "border-warn/40 bg-warn/10 text-warn",
   needs_more_budget: "border-warn/40 bg-warn/10 text-warn",
   failed: "border-bad/40 bg-bad/10 text-bad",
+  interrupted: "border-warn/40 bg-warn/10 text-warn",
 };
 
 const DONE_TEXT: Record<Exclude<RunStateName, "running">, string> = {
@@ -21,6 +22,7 @@ const DONE_TEXT: Record<Exclude<RunStateName, "running">, string> = {
   partial: "Finished, with some gaps.",
   needs_more_budget: "Stopped: the budget ran out.",
   failed: "The run failed.",
+  interrupted: "Stopped: the server restarted.",
 };
 
 /** One sentence for what the agent is doing right now. */

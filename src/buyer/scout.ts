@@ -31,15 +31,60 @@ export function rememberRun(run: RunState) {
   }
 }
 
-export const getRun = (id: string) => runs.get(id);
+export const MAX_SAVED_RUNS = 1000;
+/** Writes a run's whole state so its results outlive a restart. Past MAX_SAVED_RUNS the oldest lose theirs, as dry runs are free to start. */
+function saveRun(run: RunState) {
+  try {
+    db.prepare("UPDATE runs SET state = ?, finished_at = ?, run_json = ? WHERE id = ?").run(run.state, run.finishedAt ?? null, JSON.stringify({ ...run, inflight: undefined }), run.id);
+    db.prepare("UPDATE runs SET run_json = NULL WHERE run_json IS NOT NULL AND id NOT IN (SELECT id FROM runs WHERE run_json IS NOT NULL ORDER BY ts DESC LIMIT ?)").run(MAX_SAVED_RUNS);
+  } catch (err: any) {
+    console.error(`could not save run ${run.id}: ${err?.message ?? err}`);
+  }
+}
+
+export function getRun(id: string): RunState | undefined {
+  const live = runs.get(id);
+  if (live) return live;
+  const row = db.prepare("SELECT run_json FROM runs WHERE id = ?").get(id) as { run_json: string | null } | undefined;
+  return row?.run_json ? (JSON.parse(row.run_json) as RunState) : undefined;
+}
 
 /** Does this user have a paying run in progress? (A withdrawal must wait for it.) */
 export const hasActiveRun = (owner: string) => [...runs.values()].some((r) => r.owner === owner.toLowerCase() && r.state === "running" && !r.dryRun);
-export const listRuns = (owner: string) =>
-  [...runs.values()]
-    .filter((r) => r.owner === owner.toLowerCase())
-    .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
-    .slice(0, 50);
+
+export function listRuns(owner: string): RunState[] {
+  const me = owner.toLowerCase();
+  const saved = db.prepare("SELECT run_json FROM runs WHERE owner = ? AND run_json IS NOT NULL ORDER BY ts DESC LIMIT 50").all(me) as { run_json: string }[];
+  const byId = new Map(saved.map((r) => JSON.parse(r.run_json) as RunState).map((r) => [r.id, r]));
+  for (const r of runs.values()) if (r.owner === me) byId.set(r.id, r); // memory holds the latest state of a live run
+  return [...byId.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, 50);
+}
+
+/**
+ * Called once on boot: a run still marked running died with the last process. Its purchases are on the ledger (the
+ * resolver settles any left unconfirmed), so what it spent comes from there.
+ */
+export function markInterruptedRuns(now = new Date().toISOString()): number {
+  const stuck = db.prepare("SELECT id, run_json FROM runs WHERE state = 'running'").all() as { id: string; run_json: string | null }[];
+  for (const { id, run_json } of stuck) {
+    if (!run_json) {
+      db.prepare("UPDATE runs SET state = 'interrupted', finished_at = ? WHERE id = ?").run(now, id);
+      continue;
+    }
+    const run = JSON.parse(run_json) as RunState;
+    const paid = db.prepare("SELECT paid FROM ledger WHERE run_id = ? AND status IN ('paid','paid_output_rejected')").all(id) as { paid: string }[];
+    const spent = paid.reduce((sum, row) => sum + BigInt(row.paid), 0n);
+    const budget = BigInt(run.budget);
+    run.state = "interrupted";
+    run.spent = spent.toString();
+    run.remaining = (spent < budget ? budget - spent : 0n).toString();
+    run.finishedAt = now;
+    run.explanation = "The server restarted while this run was working, so it stopped here. What it paid for is on the ledger; a payment left unconfirmed is checked against the chain automatically.";
+    run.log.push("interrupted: the server restarted during this run");
+    saveRun(run);
+  }
+  return stuck.length;
+}
 
 // The shared demo wallet pays for anonymous runs, judge calls and the CLI; a signed-in user's run pays with their own agent wallet.
 const payWith = (payer: SafePayer) => (...args: Parameters<SafePayer["call"]>) => payer.call(...args);
@@ -113,12 +158,14 @@ export function startTask(opts: StartOptions): RunState {
     startedAt: new Date().toISOString(),
   };
   rememberRun(run);
-  db.prepare("INSERT INTO runs (id, ts, task, budget) VALUES (?,?,?,?)").run(run.id, run.startedAt, run.task, run.budget);
-  executeTask(run, mode, payer, opts.llm).catch((err) => {
-    run.state = "failed";
-    run.log.push(`fatal: ${err?.message ?? err}`);
-    run.finishedAt = new Date().toISOString();
-  });
+  db.prepare("INSERT INTO runs (id, ts, task, budget, state, owner, run_json) VALUES (?,?,?,?,?,?,?)").run(run.id, run.startedAt, run.task, run.budget, run.state, run.owner ?? null, JSON.stringify(run));
+  executeTask(run, mode, payer, opts.llm)
+    .catch((err) => {
+      run.state = "failed";
+      run.log.push(`fatal: ${err?.message ?? err}`);
+      run.finishedAt = new Date().toISOString();
+    })
+    .finally(() => saveRun(run));
   return run;
 }
 
@@ -144,7 +191,6 @@ async function executeTask(run: RunState, mode: NonNullable<StartOptions["mode"]
     });
     if (outcome.handled) {
       run.finishedAt = new Date().toISOString();
-      db.prepare("UPDATE runs SET result = ? WHERE id = ?").run(JSON.stringify({ state: run.state, result: run.result, purchases: run.purchases }), run.id);
       ctx.log(`done: ${run.state}. spent ${usd(run.spent ?? "0")} USDC, ${usd(run.remaining ?? run.budget)} left`);
       return;
     }
@@ -264,7 +310,6 @@ async function executeLegacy(run: RunState, ctx: Ctx, budget: BudgetLedger, llm?
 
   run.explanation = explain(run, plan);
   run.finishedAt = new Date().toISOString();
-  db.prepare("UPDATE runs SET result = ? WHERE id = ?").run(JSON.stringify({ state: run.state, result: run.result, purchases: run.purchases }), run.id);
   ctx.log(`done: ${run.state}. spent ${usd(run.spent)} USDC, ${usd(run.remaining)} left`);
 }
 

@@ -43,7 +43,7 @@ export function AgentWalletCard() {
           <p>
             Sign in to give your buyer agent its own wallet. You put in a little test USDC, the agent spends only that, and you can take the rest back. Signed out, runs use the shared demo wallet.
           </p>
-          {info ? (
+          {info?.spendCap ? (
             <div className="w-full max-w-md">
               <SpendCapBar cap={info.spendCap} label="Shared demo wallet limit" />
             </div>

@@ -322,8 +322,10 @@ export interface Info {
   sellers: SellerInfo[];
   llm: { host: string; model: string; available: boolean };
   buyerTokenRequired: boolean;
-  /** Cap of the shared demo wallet (signed-in users get their own, see AgentWalletInfo). */
-  spendCap: { enabled: boolean; limitUsdc: string; windowMinutes: number; usedUsdc: string; remainingUsdc: string };
+  /** Cap of the shared demo wallet (signed-in users get their own, see AgentWalletInfo). null when the server can't read it. */
+  spendCap: { enabled: boolean; limitUsdc: string; windowMinutes: number; usedUsdc: string; remainingUsdc: string } | null;
+  /** Last pass of each background worker that has run. */
+  workers: Record<string, { lastTick: string; ok: boolean }>;
 }
 
 export interface ServicesResponse {

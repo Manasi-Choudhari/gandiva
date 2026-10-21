@@ -6,6 +6,7 @@ import { auth } from "./auth/routes.js";
 import { buyer } from "./buyer/routes.js";
 import { requestSizeLimit } from "./http/bodyLimit.js";
 import { corsPolicy, sameSiteWrites } from "./http/cors.js";
+import { healthz, spendCapStatus } from "./http/health.js";
 import { apiSecurityHeaders, privateNoStore } from "./http/headers.js";
 import { rateLimit } from "./http/rateLimit.js";
 import { onServerError, requestIds, requestLog } from "./http/requestLog.js";
@@ -21,7 +22,7 @@ import { activeSellerDefs, buildSellers, seedRegistry } from "./sellers/index.js
 import { startSellerProcesses } from "./sellers/supervisor.js";
 import { getResourceServer } from "./x402/resourceServer.js";
 import { startResolver } from "./x402/resolver.js";
-import { spendCap } from "./x402/spendCap.js";
+import { workerStatus } from "./workers.js";
 
 const app = new Hono();
 app.use("*", requestIds());
@@ -58,11 +59,12 @@ app.get("/api/info", async (c) => {
     sellers: active.map((s) => ({ id: s.id, payTo: s.payTo, endpoint: `${config.publicBaseUrl}/sellers/${s.id}${s.path}`, adversarial: !!s.adversarial })),
     llm: { host: config.ollama.host.replace(/\/\/.*@/, "//"), model: config.ollama.model, available: await llmAvailable() },
     buyerTokenRequired: Boolean(config.buyerToken),
-    spendCap: spendCap.status(),
+    spendCap: spendCapStatus(),
+    workers: workerStatus(),
   });
 });
 
-app.get("/healthz", (c) => c.json({ ok: true }));
+app.get("/healthz", healthz);
 
 seedRegistry(active);
 markInterruptedRuns();

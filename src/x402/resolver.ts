@@ -1,6 +1,7 @@
 import { resolveUnknownWithdrawals } from "../agents/wallet.js";
 import { fromUnits } from "../config.js";
 import { log } from "../log.js";
+import { workerTick } from "../workers.js";
 import { listAuditable, listUnconfirmed, resolveLedger } from "../registry/store.js";
 import { chainTime, lookupAuthorization, type AuthRef } from "./chain.js";
 
@@ -80,7 +81,9 @@ export function startResolver(intervalMs = 15_000) {
       if (s.paid || s.notCharged) log("info", "resolver: settled", { paid: s.paid, notCharged: s.notCharged, stillOpen: s.stillOpen });
       const w = await resolveUnknownWithdrawals();
       if (w) log("info", "resolver: settled withdrawals of unknown outcome", { withdrawals: w });
+      workerTick("resolver");
     } catch (err: any) {
+      workerTick("resolver", false);
       log("warn", "resolver: tick failed", { error: String(err?.message ?? err) });
     } finally {
       running = false;

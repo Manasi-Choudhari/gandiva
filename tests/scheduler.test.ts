@@ -14,7 +14,7 @@ const req = (o: Partial<CallRequest> = {}): CallRequest => ({
 
 describe("PaymentScheduler", () => {
   it("starts calls immediately while slots are free", async () => {
-    const s = new PaymentScheduler(2, 2);
+    const s = new PaymentScheduler(2, 2, 30_000, () => 0);
     const a = await s.acquire(req());
     const b = await s.acquire(req());
     expect(a.waitedMs).toBe(0);

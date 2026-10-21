@@ -3,6 +3,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 import { config, fromUnits, USDC_ADDRESS } from "../config.js";
 import { db } from "../db.js";
+import { log } from "../log.js";
 import { slashedTotal } from "../stake/claims.js";
 import { stakeOf, type StakePosition } from "../stake/index.js";
 import { getService, listServices, reputationFor, SEED_OWNER, setCredibilityLookup, type Service, type ServiceWithReputation } from "./store.js";
@@ -216,9 +217,9 @@ export async function refreshCredibility() {
 }
 
 export function startCredibilityRefresh(everyMs = 60_000) {
-  const run = () => refreshCredibility().catch((err) => console.error(`[credibility] refresh failed: ${err?.message ?? err}`));
+  const run = () => refreshCredibility().catch((err) => log("error", "credibility: refresh failed", { error: String(err?.message ?? err) }));
   void proveBuiltIns()
-    .catch((err) => console.error(`[credibility] built-in proofs failed: ${err?.message ?? err}`))
+    .catch((err) => log("error", "credibility: built-in proofs failed", { error: String(err?.message ?? err) }))
     .then(run);
   setInterval(run, everyMs).unref();
 }

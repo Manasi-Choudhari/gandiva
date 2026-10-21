@@ -8,6 +8,7 @@ import { requestSizeLimit } from "./http/bodyLimit.js";
 import { corsPolicy, sameSiteWrites } from "./http/cors.js";
 import { apiSecurityHeaders, privateNoStore } from "./http/headers.js";
 import { rateLimit } from "./http/rateLimit.js";
+import { onServerError, requestIds, requestLog } from "./http/requestLog.js";
 import { getPayer, markInterruptedRuns } from "./buyer/scout.js";
 import { llmAvailable } from "./llm.js";
 import { mcp } from "./mcp/server.js";
@@ -23,16 +24,15 @@ import { startResolver } from "./x402/resolver.js";
 import { spendCap } from "./x402/spendCap.js";
 
 const app = new Hono();
+app.use("*", requestIds());
+app.use("*", requestLog());
 app.use("*", apiSecurityHeaders());
 app.use("*", privateNoStore());
 app.use("*", corsPolicy());
 app.use("*", sameSiteWrites());
 app.use("*", rateLimit());
 app.use("*", requestSizeLimit());
-app.onError((err, c) => {
-  console.error(`[error] ${c.req.method} ${c.req.path}: ${err.message}`);
-  return c.json({ error: "internal error" }, 500);
-});
+app.onError(onServerError);
 
 // SELLER_PROCESSES=on: each seller runs as its own process and this server forwards /sellers/<id>/... to it.
 const remote = config.sellerProcesses ? await startSellerProcesses(activeSellerDefs().filter((d) => !d.inProcess).map((d) => d.id)) : new Map<string, number>();

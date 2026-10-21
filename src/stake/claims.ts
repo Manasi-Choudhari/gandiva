@@ -2,6 +2,7 @@ import type { Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { config } from "../config.js";
 import { db } from "../db.js";
+import { log } from "../log.js";
 import { getEvidence, holdEvidence, MAX_EVIDENCE_BODY } from "./evidence.js";
 import { chainView, claimOnChain, executeOnChain, proposeOnChain, relayerStatus, stakeEnabled, StakeError, verifierSet, vetoOnChain } from "./index.js";
 import { checkClaim, checkRebuttal, claimIdOf, claimSignerOf, signClaim, signVeto, vetoSignerOf, type ClaimMessage } from "./verify.js";
@@ -199,12 +200,12 @@ export function startClaimWorker(intervalMs = 30_000) {
       if (Date.now() - lastHealth > 10 * 60_000) {
         lastHealth = Date.now();
         const s = claimSummary();
-        if (s.oldestOpenMinutes !== null && s.oldestOpenMinutes > 60) console.warn(`[claims] ${s.open} open, oldest ${s.oldestOpenMinutes} min: check /registry/stake/claims`);
+        if (s.oldestOpenMinutes !== null && s.oldestOpenMinutes > 60) log("warn", "claims: stuck, check /registry/stake/claims", { open: s.open, oldestOpenMinutes: s.oldestOpenMinutes });
         const r = await relayerStatus();
-        if (r.low) console.warn(`[claims] relayer ${r.address} has only ${r.eth} ETH; refill it or stakes and refunds will stop`);
+        if (r.low) log("warn", "claims: relayer low on ETH, refill it or stakes and refunds will stop", { address: r.address, eth: r.eth });
       }
     } catch (err: any) {
-      console.warn(`[claims] ${err?.message ?? err}`);
+      log("warn", "claims: tick failed", { error: String(err?.message ?? err) });
     } finally {
       running = false;
     }

@@ -1,5 +1,6 @@
 import { resolveUnknownWithdrawals } from "../agents/wallet.js";
 import { fromUnits } from "../config.js";
+import { log } from "../log.js";
 import { listAuditable, listUnconfirmed, resolveLedger } from "../registry/store.js";
 import { chainTime, lookupAuthorization, type AuthRef } from "./chain.js";
 
@@ -43,7 +44,7 @@ export async function resolveUnconfirmed(): Promise<ResolveSummary> {
       } else summary.stillOpen++;
     } catch (err: any) {
       summary.stillOpen++;
-      console.warn(`[resolver] ledger #${row.id}: ${String(err?.shortMessage ?? err?.message ?? err).slice(0, 160)}`);
+      log("warn", "resolver: lookup failed", { ledgerId: row.id, error: String(err?.shortMessage ?? err?.message ?? err).slice(0, 160) });
     }
   }
 
@@ -59,7 +60,7 @@ export async function resolveUnconfirmed(): Promise<ResolveSummary> {
         if (fixed) summary.paid++;
       }
     } catch (err: any) {
-      console.warn(`[resolver] audit of ledger #${row.id}: ${String(err?.shortMessage ?? err?.message ?? err).slice(0, 160)}`);
+      log("warn", "resolver: audit failed", { ledgerId: row.id, error: String(err?.shortMessage ?? err?.message ?? err).slice(0, 160) });
     }
   }
   return summary;
@@ -76,11 +77,11 @@ export function startResolver(intervalMs = 15_000) {
     running = true;
     try {
       const s = await resolveUnconfirmed();
-      if (s.paid || s.notCharged) console.log(`[resolver] settled ${s.paid} paid, ${s.notCharged} not charged (${s.stillOpen} still open)`);
+      if (s.paid || s.notCharged) log("info", "resolver: settled", { paid: s.paid, notCharged: s.notCharged, stillOpen: s.stillOpen });
       const w = await resolveUnknownWithdrawals();
-      if (w) console.log(`[resolver] settled ${w} withdrawal(s) of unknown outcome from the chain`);
+      if (w) log("info", "resolver: settled withdrawals of unknown outcome", { withdrawals: w });
     } catch (err: any) {
-      console.warn(`[resolver] ${err?.message ?? err}`);
+      log("warn", "resolver: tick failed", { error: String(err?.message ?? err) });
     } finally {
       running = false;
     }

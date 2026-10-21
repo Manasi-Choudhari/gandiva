@@ -1,4 +1,5 @@
-# Type check and the test suite on every push and pull request. Spends nothing: tests mock the chain and the facilitator.
+# Type check, tests, client build, dependency audit and a secret scan on every push and pull request.
+# Spends nothing: tests mock the chain and the facilitator. Actions are pinned to commit SHAs (Dependabot bumps them).
 name: ci
 
 on:
@@ -9,16 +10,66 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
       - run: npm run typecheck
       - run: npx vitest run
+
+  client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NEXT_TELEMETRY_DISABLED: 1
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm --prefix client ci
+      - name: audit production dependencies
+        run: npm --prefix client audit --omit=dev --audit-level=high
+      # next build type-checks too and generates the route types the plain tsc run needs.
+      - run: npm --prefix client run build
+      - run: npm --prefix client run typecheck
+
+  # The official release binary, checked against its sha256 (avoids the gitleaks-action licence key).
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: install gitleaks
+        run: |
+          f=gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz
+          curl -sSfL -o "$RUNNER_TEMP/$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$f"
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$f" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" gitleaks
+      - name: scan the full history
+        run: '"$RUNNER_TEMP/gitleaks" git . --no-banner --redact=100 --verbose'

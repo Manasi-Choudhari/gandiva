@@ -2,6 +2,32 @@ import type { NextConfig } from "next";
 
 // The Hono backend always runs separately; Next is the public front door and proxies to it.
 const API_URL = process.env.API_URL || "http://localhost:4021";
+const dev = process.env.NODE_ENV !== "production";
+
+// Everything loads from this site: fonts are self-hosted by next/font and the wallet talks to the browser extension,
+// not the network. Inline scripts stay allowed because Next and next-themes inject them (nonces would force every page
+// to render dynamically); the dev server also needs eval and its hot-reload socket.
+const CSP = [
+  "default-src 'self'",
+  `script-src 'self' 'unsafe-inline'${dev ? " 'unsafe-eval'" : ""}`,
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  `connect-src 'self'${dev ? " ws: wss:" : ""}`,
+  "frame-ancestors 'none'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  ...(dev ? [] : ["upgrade-insecure-requests"]),
+].join("; ");
+
+const SECURITY_HEADERS = [
+  { key: "Content-Security-Policy", value: CSP },
+  { key: "X-Content-Type-Options", value: "nosniff" },
+  { key: "X-Frame-Options", value: "DENY" },
+  { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+  { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), payment=(), usb=()" },
+];
 
 const nextConfig: NextConfig = {
   cacheComponents: true,
@@ -21,6 +47,9 @@ const nextConfig: NextConfig = {
         as: "*.css",
       },
     },
+  },
+  async headers() {
+    return [{ source: "/:path*", headers: SECURITY_HEADERS }];
   },
   async rewrites() {
     return [

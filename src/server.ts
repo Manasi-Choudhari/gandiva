@@ -6,6 +6,7 @@ import { auth } from "./auth/routes.js";
 import { buyer } from "./buyer/routes.js";
 import { requestSizeLimit } from "./http/bodyLimit.js";
 import { corsPolicy, sameSiteWrites } from "./http/cors.js";
+import { apiSecurityHeaders, privateNoStore } from "./http/headers.js";
 import { rateLimit } from "./http/rateLimit.js";
 import { getPayer } from "./buyer/scout.js";
 import { llmAvailable } from "./llm.js";
@@ -22,6 +23,8 @@ import { startResolver } from "./x402/resolver.js";
 import { spendCap } from "./x402/spendCap.js";
 
 const app = new Hono();
+app.use("*", apiSecurityHeaders());
+app.use("*", privateNoStore());
 app.use("*", corsPolicy());
 app.use("*", sameSiteWrites());
 app.use("*", rateLimit());

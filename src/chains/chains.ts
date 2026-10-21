@@ -236,6 +236,11 @@ export interface ChainDeps {
 }
 
 const inflight = new Map<string, number>();
+/**
+ * Buyers with a chain request running. The chain pays its suppliers before their payment settles, so one wallet firing
+ * requests in parallel could drain floats faster than failed settlements can count against it: one at a time, across all chains.
+ */
+const activePayers = new Set<string>();
 /** Owners whose chains are paying suppliers right now (one entry per running request). */
 const payingOwners: string[] = [];
 /** Is one of this wallet's chains paying from its agent wallet right now? (A withdrawal must wait for it.) */
@@ -347,8 +352,11 @@ function stepInput(step: ChainStep, results: Map<string, unknown>, target: Schem
  * that fails throws ServiceError before the buyer's payment settles, so the buyer is only charged for a finished job.
  */
 export async function runChain(chain: Chain, input: Record<string, unknown>, deps: ChainDeps, opts: RunContext = {}) {
+  const buyer = opts.payer?.toLowerCase();
+  if (buyer && activePayers.has(buyer)) throw new ServiceError(`${opts.payer} already has an agent chain request running; try again when it finishes`, 429);
   const busy = inflight.get(chain.serviceId) ?? 0;
   if (busy >= MAX_CONCURRENT) throw new ServiceError(`this chain is already handling ${MAX_CONCURRENT} requests; try again in a moment`, 503);
+  if (buyer) activePayers.add(buyer);
   inflight.set(chain.serviceId, busy + 1);
   payingOwners.push(chain.owner.toLowerCase());
   let run: RunState | undefined;
@@ -460,6 +468,7 @@ export async function runChain(chain: Chain, input: Record<string, unknown>, dep
       cost_units: run.purchases.filter(isPaid).reduce((sum, p) => sum + BigInt(p.paid), 0n).toString(),
     };
   } finally {
+    if (buyer) activePayers.delete(buyer);
     payingOwners.splice(payingOwners.indexOf(chain.owner.toLowerCase()), 1);
     const left = (inflight.get(chain.serviceId) ?? 1) - 1;
     if (left > 0) inflight.set(chain.serviceId, left);

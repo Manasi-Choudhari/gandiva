@@ -328,6 +328,31 @@ describe("agent chain: running", () => {
       await expect(runChain(chainOf(plan()), input, deps(p.pay, { payerBalance: async () => 20_000n }), who)).resolves.toBeDefined();
     });
 
+    it("runs one request per payer at a time across all chains, and frees them when it ends", async () => {
+      let release!: () => void;
+      const gated = fakePay(new Promise<void>((r) => (release = r)));
+      const first = runChain(chainOf(plan()), input, deps(gated.pay), who);
+
+      const idle = fakePay();
+      const again = { ...who, payer: who.payer.toLowerCase() };
+      await expect(runChain(chainOf(plan()), input, deps(idle.pay), again)).rejects.toMatchObject({ status: 429, message: expect.stringMatching(/already has an agent chain request running/) });
+      await expect(runChain(chainOf(plan(), 13000n, "another-chain"), input, deps(idle.pay), who)).rejects.toMatchObject({ status: 429 });
+      expect(idle.calls).toEqual([]);
+
+      await expect(runChain(chainOf(plan(), 13000n, "another-chain"), input, deps(idle.pay), { ...who, payer: "0xSomeoneElse" })).resolves.toBeDefined();
+      await expect(runChain(chainOf(plan(), 13000n, "another-chain"), input, deps(idle.pay))).resolves.toBeDefined(); // the owner's test run has no payer
+
+      release();
+      await first;
+      await expect(runChain(chainOf(plan()), input, deps(fakePay().pay), who)).resolves.toBeDefined();
+    });
+
+    it("frees the payer when a request fails", async () => {
+      const broken = deps(fakePay().pay, { balance: async () => Promise.reject(new Error("rpc down")) });
+      await expect(runChain(chainOf(plan()), input, broken, who)).rejects.toMatchObject({ status: 503 });
+      await expect(runChain(chainOf(plan()), input, deps(fakePay().pay), who)).resolves.toBeDefined();
+    });
+
     it(`refuses a payer after ${MAX_STRIKES} payments that failed to settle in the last hour, before paying anyone`, async () => {
       const strike = (payer: string) => addSale({ seller: "my-chain", payer, amount: "0", status: "settle_failed", reason: "insufficient funds", latencyMs: 1 });
       for (let i = 0; i < MAX_STRIKES - 1; i++) strike(who.payer);
@@ -552,6 +577,24 @@ describe("agent chain: Sell tab and paid route", () => {
     expect(paid.status).toBe(503);
     expect(((await paid.json()) as any).error).toMatch(/out of float/);
     expect(fake.settleCalls).toBe(0);
+  });
+
+  it("a payer with a chain request already running is turned away uncharged, and it is not held against them", async () => {
+    await send("POST", "/mine/chains", aliceCookie, form());
+    const payer = "0x" + "99".repeat(20);
+    let release!: () => void;
+    const plan = planChain(travel(), "some-other-chain", lookupIn(listed()));
+    const held = runChain(chainOf(plan, 13000n, "some-other-chain"), { city: "Tokyo", currency: "GBP" }, deps(fakePay(new Promise<void>((r) => (release = r))).pay), { payer });
+
+    const res = await run("tokyo-brief", { city: "Tokyo", currency: "GBP" }, "0x" + "03".repeat(32));
+    expect(res.status).toBe(429);
+    expect(await res.json()).toMatchObject({ charged: false, error: expect.stringMatching(/already has an agent chain request running/) });
+    expect(fake.settleCalls).toBe(0);
+    const row = db.prepare("SELECT status FROM sales WHERE seller = 'tokyo-brief' AND reason LIKE '%already has an agent chain%'").get() as { status: string };
+    expect(row.status).toBe("failed_not_charged");
+
+    release();
+    await held;
   });
 
   it("a payer with too many failed settlements is turned away before any supplier is paid, and the refusal is recorded", async () => {

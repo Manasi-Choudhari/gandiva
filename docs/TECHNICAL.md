@@ -8,6 +8,7 @@ The deeper parts of the project. For the overview and live links, see the [READM
 - [Seller comparison](#seller-comparison-why-one-seller-is-picked)
 - [Priority scheduling for simultaneous payments](#priority-scheduling-for-simultaneous-payments)
 - [Deploying (Render API + Vercel UI)](#deploying-render-api--vercel-ui)
+- [One server instance](#one-server-instance)
 
 ## Local setup in detail
 
@@ -129,4 +130,30 @@ Things to know:
 - **Deploys:** auto-deploy is off, so deploy by hand.
 - **The free plan sleeps after 15 idle minutes.** Point an uptime pinger (e.g. UptimeRobot) at `/healthz` every 5 minutes.
 - Every registry listing and 402 `resource.url` is built from `PUBLIC_BASE_URL`, so sellers are reached on the Render URL directly, not through Vercel.
+- **Logs are JSON lines.** Each request logs its method, path, status, time, IP and request id, never headers, bodies or the query string. A 500 response carries a `requestId`; search the logs for it to find the real error.
+- **Health:** `/healthz` runs a query against the database and answers 503 if it can't. `/api/info` shows when each background worker last ran under `workers`.
+- **Restarts:** a run cut off by a restart or deploy shows as `interrupted`, with its spending taken from the ledger.
 - Local image check: `docker build -t gandiva-api .`
+
+## One server instance
+
+The API is built to run as exactly one process. Render's `render.yaml` runs one, and the free plan can't run more. Some of what keeps payments safe lives in that process's memory, so a second instance would not be slower: it would be wrong. Don't add one without doing the work below.
+
+| State | Where | What goes wrong with two instances | What to change |
+|---|---|---|---|
+| Spend cap reservations (`inFlight`) | `src/x402/spendCap.ts` | Each sees only its own payments in flight, so together they can pass the cap | A reservations table, checked and written in one transaction |
+| Active runs (`runs`, `hasActiveRun`) | `src/buyer/scout.ts` | A withdrawal on one instance can't see a run paying from that wallet on the other | Check `runs.state = 'running'` in the database |
+| Boot sweep (`markInterruptedRuns`) | `src/buyer/scout.ts` | A starting instance marks the other's live runs as `interrupted` | Record which instance owns a run, and sweep only instances that stopped heartbeating |
+| Chain locks (`activePayers`, `inflight`, `payingOwners`) | `src/chains/chains.ts` | A payer gets one chain per instance, and a withdrawal can miss a chain that's paying | Rows with an expiry, so a crash can't leave a lock held |
+| Paid step cache (`stepCache`) | `src/chains/chains.ts` | A retry reaching the other instance pays the same suppliers twice | A table with the same 10-minute expiry |
+| Withdrawal lock (`locks`) | `src/agents/wallet.ts` | Two withdrawals for one user can run at once | A per-user row taken before the withdrawal starts |
+| Relayer send lock (`sendLock`) | `src/stake/index.ts` | Both instances send with the same nonce, so one transaction replaces or fails the other | Only one instance relays, or the nonce is handed out from the database |
+| Payment slots | `src/x402/scheduler.ts` | Slot limits apply per instance, and priority only orders calls within one instance | Slot counts in the database, with the queue on one instance |
+| Rate limits | `src/http/rateLimit.ts`, `src/stake/routes.ts`, `src/agents/llm.ts`, `src/chains/chains.ts`, `src/hosted/agents.ts`, `src/mcpseller/servers.ts` | Every limit is multiplied by the number of instances | Counters in the database, or a shared store |
+| Workers (resolver, claims, credibility) | `startResolver`, `startClaimWorker`, `startCredibilityRefresh` | Each pass runs twice, and the claim worker can spend relayer gas on duplicate transactions | A lease row, so one instance at a time does the work |
+
+**Moving this into SQLite only gets as far as one machine.** Several processes can share a SQLite file on one disk, so the table above is enough for that. It doesn't cover several machines: the file isn't shared between them, and Litestream expects a single process to own the database. That needs a networked database such as Postgres, and because `better-sqlite3` is synchronous, every store function that uses it would change as well.
+
+**Safe to leave per process:** the credibility, stake, FX, book and schema caches, and the cached payers and RPC clients. They expire or rebuild, and a miss only costs a repeat read.
+
+`SELLER_PROCESSES=on` is not a second instance. Each seller process has its own database and takes only the traffic the API forwards to it.

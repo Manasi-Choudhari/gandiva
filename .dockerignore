@@ -15,3 +15,5 @@ REVIEW.md
 TEST-GUIDE.md
 Dockerfile
 .dockerignore
+lib
+foundry

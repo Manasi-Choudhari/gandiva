@@ -1,0 +1,30 @@
+# SellerStakeV2 is built, tested and deployed with Foundry. The Node project keeps tests/ and scripts/; everything of
+# Foundry's own lives under foundry/ (lib/ is where `forge install` puts the pinned libraries).
+[profile.default]
+src = "contracts"
+test = "foundry/test"
+script = "foundry/script"
+out = "foundry/out"
+cache_path = "foundry/cache"
+broadcast = "foundry/broadcast"
+libs = ["lib"]
+solc_version = "0.8.28"
+# ReentrancyGuardTransient needs transient storage. Base Sepolia has had it since the Cancun upgrade.
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+# No metadata hash: it depends on file paths, and the bytecode must come out the same on Windows and in CI.
+bytecode_hash = "none"
+remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/", "forge-std/=lib/forge-std/src/"]
+
+# Slither and Aderyn are the linters here (see CI); forge's style notes would only bury compiler errors.
+[lint]
+lint_on_build = false
+
+[fuzz]
+runs = 1000
+
+[invariant]
+runs = 256
+depth = 100
+fail_on_revert = false

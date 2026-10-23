@@ -12,3 +12,7 @@ dist/
 .next/
 tools/
 .cursor/
+
+# Foundry
+foundry/out/
+foundry/cache/

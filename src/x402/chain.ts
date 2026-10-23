@@ -13,6 +13,13 @@ export const LOG_CHUNK = 150n;
 export const PARALLEL_CHUNKS = 8;
 const BASE_BLOCK_SECONDS = 2;
 
+/** `start` to `end` as block ranges an RPC accepts, oldest first, with no gap and no block twice. */
+export function logRanges(start: bigint, end: bigint): [bigint, bigint][] {
+  const ranges: [bigint, bigint][] = [];
+  for (let from = start; from <= end; from += LOG_CHUNK + 1n) ranges.push([from, from + LOG_CHUNK < end ? from + LOG_CHUNK : end]);
+  return ranges;
+}
+
 let client: PublicClient | null = null;
 export const chainClient = (): PublicClient => (client ??= createPublicClient({ chain: baseSepolia, transport: http(config.rpcUrl) }) as PublicClient);
 

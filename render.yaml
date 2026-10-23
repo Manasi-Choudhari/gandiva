@@ -65,6 +65,8 @@ services:
         sync: false
       - key: RELAYER_PRIVATE_KEY
         sync: false
+      - key: RELAY_MAX_GWEI
+        value: "0.02"
       - key: RECEIPT_SIGNER_KEY
         sync: false
       - key: SERVER_VERIFIER_KEY

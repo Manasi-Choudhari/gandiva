@@ -80,6 +80,9 @@ export const config = {
     contract: env("STAKE_CONTRACT") as `0x${string}` | "",
     // Pays the gas for relayed stakes, claims and refunds. It has no powers over bonds; keep ~0.01 Base Sepolia ETH on it.
     relayerKey: env("RELAYER_PRIVATE_KEY") as `0x${string}` | "",
+    // Above this gas price the relayer stops sending seller actions. A full seller cycle (372k gas) uses up its 0.02 USDC fee
+    // at about 0.024 gwei with ETH at $2,240, see docs/STAKE.md. Refunds still go.
+    relayMaxGwei: env("RELAY_MAX_GWEI", "0.02"),
     // This server's own verifier, one of the three; the other two run elsewhere (scripts/verifier.ts).
     verifierKey: env("SERVER_VERIFIER_KEY") as `0x${string}` | "",
     // Signs the X-Gandiva-Receipt the built-in sellers attach to paid responses (evidence for stake claims). Holds no money.

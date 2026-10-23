@@ -2,18 +2,24 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Mutex } from "async-mutex";
-import { createPublicClient, createWalletClient, decodeEventLog, formatEther, http, parseSignature, verifyTypedData, zeroAddress, type Abi, type Hex, type Log } from "viem";
+import { createPublicClient, createWalletClient, decodeEventLog, formatEther, http, parseGwei, parseSignature, verifyTypedData, zeroAddress, type Abi, type Hex, type Log } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 import { config, EXPLORER_TX, fromUnits, USDC_ADDRESS, USDC_EIP712 } from "../config.js";
 import { db } from "../db.js";
+import { logRanges } from "../x402/chain.js";
 import { rpcChainView, stakeDomain as v2Domain, type ClaimMessage } from "./verify.js";
 
-/** Smallest stake worth relaying (the relayer pays the gas) and the largest single authorisation we accept. */
-export const MIN_STAKE = 5_000n;
+/** Smallest stake worth relaying (0.02 fee plus 0.01 bond) and the largest single authorisation we accept. */
+export const MIN_STAKE = 30_000n;
 export const MAX_STAKE = 5_000_000n;
 /** Below this the relayer warns: it pays the gas for every stake, claim and refund. */
 const LOW_ETH = 2_000_000_000_000_000n; // 0.002 ETH
+/** A seller may change its receipt signer this often: the stake fee only prepays the first one. */
+const SIGNER_CHANGES_PER_DAY = 3;
+/** SellerStakeV2.CLAIMS_PER_WINDOW: past this the contract refuses a proposal, so the worker waits for a slot instead. */
+export const CLAIMS_PER_WINDOW = 3;
+const BLOCK_SECONDS = 2n;
 
 const artifact = JSON.parse(readFileSync(fileURLToPath(new URL("../../contracts/SellerStakeV2.json", import.meta.url)), "utf8")) as { abi: Abi };
 const abi = artifact.abi;
@@ -32,6 +38,15 @@ CREATE TABLE IF NOT EXISTS stake_events (
   note TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS stake_events_slash_once ON stake_events (ledger_id) WHERE kind = 'slash';
+CREATE TABLE IF NOT EXISTS relayer_book (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  fn TEXT NOT NULL,
+  tx_hash TEXT NOT NULL,
+  gas_used TEXT NOT NULL,
+  gas_wei TEXT NOT NULL,
+  fee TEXT NOT NULL DEFAULT '0'
+);
 `);
 
 export class StakeError extends Error {
@@ -59,16 +74,36 @@ export const contract = () => {
   return config.stake.contract as Hex;
 };
 
-async function send(functionName: string, args: unknown[]): Promise<{ hash: Hex; block: bigint; logs: Log[] }> {
+/** True above the gas ceiling, where the fees no longer cover a relayed seller action. */
+export const overCeiling = (gasPriceWei: bigint, maxGwei: string) => gasPriceWei > parseGwei(maxGwei);
+
+/**
+ * `capped` sends wait out expensive gas: seller actions do, since a seller can always send its own transaction. Claims,
+ * vetoes and refunds never do, because a buyer's refund comes before the relayer's margin.
+ */
+async function send(functionName: string, args: unknown[], o: { capped?: boolean } = {}): Promise<{ hash: Hex; block: bigint; logs: Log[] }> {
   const address = contract();
   return sendLock.runExclusive(async () => {
+    if (o.capped && overCeiling(await pub.getGasPrice(), config.stake.relayMaxGwei)) throw new StakeError("gas is unusually expensive right now, so the relayer is paused; try again later", 503);
     // Simulating first means a call that would revert costs the relayer no gas.
     const { request } = await pub.simulateContract({ account: relayer().account, address, abi, functionName, args });
     const hash = await relayer().client.writeContract(request);
     const receipt = await pub.waitForTransactionReceipt({ hash, timeout: 90_000 });
+    // Booked before the status check: a reverted transaction still cost gas.
+    const fee = eventIn(receipt.logs, "FeePaid")?.amount ?? 0n;
+    db.prepare("INSERT INTO relayer_book (ts,fn,tx_hash,gas_used,gas_wei,fee) VALUES (?,?,?,?,?,?)").run(
+      new Date().toISOString(), functionName, hash, receipt.gasUsed.toString(), (receipt.gasUsed * receipt.effectiveGasPrice + (receipt.l1Fee ?? 0n)).toString(), fee.toString(),
+    );
     if (receipt.status !== "success") throw new StakeError(`${functionName} reverted (tx ${hash})`, 409);
     return { hash, block: receipt.blockNumber, logs: receipt.logs };
   });
+}
+
+/** What the relayer has spent on gas and earned in fees, so its operator can see whether the fees still cover it. */
+export function relayerBook() {
+  // TOTAL, not SUM: wei totals pass what SQLite integers hold, and this is a dashboard figure, so a float is fine.
+  const r = db.prepare("SELECT COUNT(*) AS txs, TOTAL(CAST(gas_wei AS REAL)) AS gas, TOTAL(CAST(fee AS REAL)) AS fees FROM relayer_book").get() as { txs: number; gas: number; fees: number };
+  return { txs: r.txs, gasEth: formatEther(BigInt(Math.round(r.gas))), feesUsdc: fromUnits(BigInt(Math.round(r.fees))) };
 }
 
 /** The first event called `name` that our contract emitted in these logs. */
@@ -124,9 +159,33 @@ export async function stakeOf(seller: string, fresh = false, atBlock?: bigint): 
   return hit?.value ?? EMPTY;
 }
 
+/** A cached bond is good enough to let a seller through; only a zero is worth a fresh read, as our last write may not show yet. */
+async function bondedPosition(seller: string): Promise<StakePosition> {
+  const pos = await stakeOf(seller);
+  return pos.staked === "0" ? stakeOf(seller, true) : pos;
+}
+
+/** The bond as the chain has it now. Unlike stakeOf this throws when the chain cannot be reached, so a claim is never closed on a failed read. */
+export const bondOnChain = (seller: string) => pub.readContract({ address: contract(), abi, functionName: "stakeOf", args: [seller] }) as Promise<bigint>;
+
+let feeCache: { stakeFee: bigint; slashFee: bigint } | null = null;
+/** Fixed at deploy, so read once. */
+export async function stakeFees() {
+  if (!feeCache) {
+    const address = contract();
+    const [stakeFee, slashFee] = await Promise.all([
+      pub.readContract({ address, abi, functionName: "stakeFee" }) as Promise<bigint>,
+      pub.readContract({ address, abi, functionName: "slashFee" }) as Promise<bigint>,
+    ]);
+    feeCache = { stakeFee, slashFee };
+  }
+  return feeCache;
+}
+
 let infoCache: { at: number; cooldown: number; total: string } | null = null;
 export async function stakeInfo() {
   if (!stakeEnabled()) return { enabled: false as const };
+  const fees = await stakeFees();
   if (!infoCache || Date.now() - infoCache.at > 30_000) {
     const address = contract();
     const [cooldown, total] = await Promise.all([
@@ -138,12 +197,14 @@ export async function stakeInfo() {
   return {
     enabled: true as const,
     contract: config.stake.contract,
-    relayer: await relayerStatus(),
+    relayer: { ...(await relayerStatus()), ...relayerBook() },
     verifiers: await verifierSet(),
     cooldownSeconds: infoCache.cooldown,
     totalStaked: infoCache.total,
     totalStakedUsdc: fromUnits(infoCache.total),
     minStake: MIN_STAKE.toString(),
+    stakeFee: fees.stakeFee.toString(),
+    slashFee: fees.slashFee.toString(),
     explorer: `https://sepolia.basescan.org/address/${config.stake.contract}`,
   };
 }
@@ -160,7 +221,7 @@ const RECEIVE_TYPES = {
 } as const;
 const usdcDomain = { name: USDC_EIP712.name, version: USDC_EIP712.version, chainId: baseSepolia.id, verifyingContract: USDC_ADDRESS as Hex } as const;
 
-/** EIP-712 data the seller signs in its wallet to stake `amount` units. Signing costs nothing; the relayer relays it. */
+/** EIP-712 data the seller signs in its wallet to stake `amount` units, fee included. Signing costs nothing; the relayer relays it. */
 export function prepareStake(seller: string, amount: bigint) {
   if (amount < MIN_STAKE || amount > MAX_STAKE) throw new StakeError(`stake must be between ${fromUnits(MIN_STAKE)} and ${fromUnits(MAX_STAKE)} USDC`);
   const message = {
@@ -194,7 +255,7 @@ export async function relayStake(s: SignedStake): Promise<{ txHash: string; expl
   const { r, s: sv, v, yParity } = parseSignature(s.signature as Hex);
   let sent: { hash: Hex; block: bigint };
   try {
-    sent = await send("stakeWithAuthorization", [message.from, value, message.validAfter, message.validBefore, message.nonce, Number(v ?? BigInt(yParity + 27)), r, sv]);
+    sent = await send("stakeWithAuthorization", [message.from, value, message.validAfter, message.validBefore, message.nonce, Number(v ?? BigInt(yParity + 27)), r, sv], { capped: true });
   } catch (err: any) {
     record({ kind: "stake", seller: s.from, amount: s.value, status: "failed", note: shortError(err) });
     throw err instanceof StakeError ? err : new StakeError(`stake rejected: ${shortError(err)}`, 409);
@@ -229,10 +290,15 @@ export async function prepareUnstake(seller: string) {
 }
 
 export async function relayUnstake(u: { seller: string; deadline: string; signature: string }) {
+  contract();
+  // The contract would accept a repeat, and each one would cost the relayer gas that no fee covers.
+  const pos = await bondedPosition(u.seller);
+  if (pos.staked === "0") throw new StakeError("nothing staked", 409);
+  if (pos.unlockAt) throw new StakeError("already unstaking", 409);
   const { r, s, v, yParity } = parseSignature(u.signature as Hex);
   let sent: { hash: Hex; block: bigint };
   try {
-    sent = await send("requestUnstakeWithSig", [u.seller, BigInt(u.deadline), Number(v ?? BigInt(yParity + 27)), r, s]);
+    sent = await send("requestUnstakeWithSig", [u.seller, BigInt(u.deadline), Number(v ?? BigInt(yParity + 27)), r, s], { capped: true });
   } catch (err: any) {
     throw err instanceof StakeError ? err : new StakeError(`unstake rejected: ${shortError(err)}`, 409);
   }
@@ -246,7 +312,7 @@ export async function withdrawFor(seller: string) {
   const before = await stakeOf(seller, true);
   let sent: { hash: Hex; block: bigint };
   try {
-    sent = await send("withdraw", [seller]);
+    sent = await send("withdraw", [seller], { capped: true });
   } catch (err: any) {
     throw err instanceof StakeError ? err : new StakeError(`withdraw rejected: ${shortError(err)}`, 409);
   }
@@ -277,11 +343,22 @@ export async function prepareReceiptSigner(seller: string, signer: string) {
   };
 }
 
+/** Counted from stake_events rather than the in-memory rate limit, so a server restart does not reset it. */
+export function signerChangesToday(seller: string, now = Date.now()): number {
+  const since = new Date(now - 86_400_000).toISOString();
+  const r = db.prepare("SELECT COUNT(*) AS n FROM stake_events WHERE kind = 'receipt-signer' AND status = 'done' AND lower(seller) = ? AND ts > ?").get(seller.toLowerCase(), since) as { n: number };
+  return r.n;
+}
+
 export async function relayReceiptSigner(b: { seller: string; signer: string; deadline: string; signature: string }) {
+  contract();
+  // Only a seller that paid the stake fee gets a relayed signer; anyone else would be free gas.
+  if ((await bondedPosition(b.seller)).staked === "0") throw new StakeError("stake first: the relayer only registers a receipt signer for a bonded seller", 409);
+  if (signerChangesToday(b.seller) >= SIGNER_CHANGES_PER_DAY) throw new StakeError(`at most ${SIGNER_CHANGES_PER_DAY} receipt signer changes a day`, 429);
   const { r, s, v, yParity } = parseSignature(b.signature as Hex);
   let sent: { hash: Hex };
   try {
-    sent = await send("setReceiptSignerWithSig", [b.seller, b.signer, BigInt(b.deadline), Number(v ?? BigInt(yParity + 27)), r, s]);
+    sent = await send("setReceiptSignerWithSig", [b.seller, b.signer, BigInt(b.deadline), Number(v ?? BigInt(yParity + 27)), r, s], { capped: true });
   } catch (err: any) {
     throw err instanceof StakeError ? err : new StakeError(`receipt signer rejected: ${shortError(err)}`, 409);
   }
@@ -337,6 +414,18 @@ export async function executeOnChain(id: Hex, seller: string): Promise<{ txHash:
   infoCache = null;
   cache.delete(seller.toLowerCase());
   return { txHash: sent.hash, paid: BigInt(e?.amount ?? 0n) };
+}
+
+/** The refund paid by an execute someone else sent. Null when no Slashed event is found. `executeAfter` says where to start looking. */
+export async function slashedOnChain(id: Hex, executeAfter: number): Promise<bigint | null> {
+  const head = await pub.getBlock();
+  const back = (head.timestamp > BigInt(executeAfter) ? head.timestamp - BigInt(executeAfter) : 0n) / BLOCK_SECONDS + 100n;
+  const start = head.number > back ? head.number - back : 0n;
+  for (const [from, to] of logRanges(start, head.number)) {
+    const logs = (await pub.getContractEvents({ address: contract(), abi, eventName: "Slashed", args: { id }, fromBlock: from, toBlock: to })) as unknown as { args: { amount: bigint } }[];
+    if (logs[0]) return logs[0].args.amount;
+  }
+  return null;
 }
 
 export async function relayerStatus(): Promise<{ address: Hex; eth: string; low: boolean }> {

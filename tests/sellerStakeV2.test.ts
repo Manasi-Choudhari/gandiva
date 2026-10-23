@@ -34,20 +34,21 @@ contract MockUSDC {
   }
 }`;
 
+// The stake contract is the real build artifact (npm run stake:compile); only the mock token is compiled here.
 function compile(): Record<string, { abi: Abi; bytecode: Hex }> {
   const out = JSON.parse(
     solc.compile(
       JSON.stringify({
         language: "Solidity",
-        sources: { "SellerStakeV2.sol": { content: readFileSync("contracts/SellerStakeV2.sol", "utf8") }, "MockUSDC.sol": { content: MOCK_USDC } },
+        sources: { "MockUSDC.sol": { content: MOCK_USDC } },
         settings: { optimizer: { enabled: true, runs: 200 }, evmVersion: "paris", outputSelection: { "*": { "*": ["abi", "evm.bytecode.object"] } } },
       }),
     ),
   );
   const errors = (out.errors ?? []).filter((e: any) => e.severity === "error");
   if (errors.length) throw new Error(errors.map((e: any) => e.formattedMessage).join("\n"));
-  const pick = (file: string, name: string) => ({ abi: out.contracts[file][name].abi, bytecode: `0x${out.contracts[file][name].evm.bytecode.object}` as Hex });
-  return { stake: pick("SellerStakeV2.sol", "SellerStakeV2"), usdc: pick("MockUSDC.sol", "MockUSDC") };
+  const mock = out.contracts["MockUSDC.sol"].MockUSDC;
+  return { stake: JSON.parse(readFileSync("contracts/SellerStakeV2.json", "utf8")), usdc: { abi: mock.abi, bytecode: `0x${mock.evm.bytecode.object}` as Hex } };
 }
 
 const artifacts = compile();

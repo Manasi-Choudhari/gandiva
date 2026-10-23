@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-/// Subset of Circle's FiatToken v2.2 (USDC) used here.
-interface IUSDC {
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+
+/// The part of Circle's FiatToken v2.2 (USDC) that plain ERC-20 does not have.
+interface IUSDC is IERC20 {
     function receiveWithAuthorization(
         address from,
         address to,
@@ -14,21 +20,17 @@ interface IUSDC {
         bytes32 r,
         bytes32 s
     ) external;
-
-    function transfer(address to, uint256 value) external returns (bool);
 }
 
 /// Sellers lock USDC as a bond behind their listings. A slash needs signatures from 2 of 3 independent verifiers, is capped
 /// at 0.10 USDC, waits out a 30 minute window in which the verifiers can veto it, and refunds the harmed buyer. There is no
 /// owner or arbiter: the verifier set changes only by 2-of-3 of itself, and every call can be relayed by anyone, so sellers
 /// never need gas.
-contract SellerStakeV2 {
+contract SellerStakeV2 is EIP712, ReentrancyGuardTransient {
     IUSDC public immutable usdc;
     /// Delay between asking to unstake and withdrawing. Longer than the claim deadline plus the window, so a seller cannot
     /// pull its bond ahead of a claim for its last sale.
     uint256 public immutable cooldown;
-    // slither-disable-next-line naming-convention (the EIP-712 / EIP-2612 name wallets and tools look for)
-    bytes32 public immutable DOMAIN_SEPARATOR;
 
     // Slither "timestamp" is accepted: deadlines and windows are minutes to hours, validators can only skew seconds.
     uint256 public constant MAX_SLASH = 100_000; // 0.10 USDC, the per-call price cap
@@ -46,8 +48,6 @@ contract SellerStakeV2 {
     bytes32 private constant VETO_TYPEHASH = keccak256("Veto(bytes32 id,uint256 deadline)");
     bytes32 private constant ROTATE_TYPEHASH =
         keccak256("Rotate(address verifier1,address verifier2,address verifier3,uint256 nonce,uint256 deadline)");
-    // Lower half of the secp256k1 order: rejects malleable signatures.
-    uint256 private constant HALF_N = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
 
     enum Status {
         None,
@@ -103,20 +103,16 @@ contract SellerStakeV2 {
     event Slashed(bytes32 indexed id, address indexed seller, address indexed to, uint256 amount);
     event VerifiersRotated(address[3] verifiers, uint256 rotationNonce);
 
-    constructor(IUSDC usdc_, address[3] memory verifiers_, uint256 cooldown_) {
+    constructor(IUSDC usdc_, address[3] memory verifiers_, uint256 cooldown_) EIP712("Gandiva SellerStake", "2") {
         require(cooldown_ > CLAIM_DEADLINE + SLASH_DELAY, "cooldown too short");
         usdc = usdc_;
         cooldown = cooldown_;
         _setVerifiers(verifiers_);
-        DOMAIN_SEPARATOR = keccak256(
-            abi.encode(
-                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-                keccak256("Gandiva SellerStake"),
-                keccak256("2"),
-                block.chainid,
-                address(this)
-            )
-        );
+    }
+
+    // slither-disable-next-line naming-convention (the EIP-712 / EIP-2612 name wallets and tools look for)
+    function DOMAIN_SEPARATOR() external view returns (bytes32) {
+        return _domainSeparatorV4();
     }
 
     // ---- staking (same as V1, except withdraw waits for open claims) ----
@@ -131,7 +127,7 @@ contract SellerStakeV2 {
         uint8 v,
         bytes32 r,
         bytes32 s
-    ) external {
+    ) external nonReentrant {
         require(value > 0, "zero stake");
         stakeOf[seller] += value;
         totalStaked += value;
@@ -144,8 +140,8 @@ contract SellerStakeV2 {
     /// Starts the cooldown with the seller's EIP-712 Unstake signature (relayed by anyone).
     function requestUnstakeWithSig(address seller, uint256 deadline, uint8 v, bytes32 r, bytes32 s) external {
         require(block.timestamp <= deadline, "signature expired");
-        bytes32 digest = _digest(keccak256(abi.encode(UNSTAKE_TYPEHASH, seller, nonces[seller]++, deadline)));
-        require(_recover(digest, v, r, s) == seller, "bad signature");
+        bytes32 structHash = keccak256(abi.encode(UNSTAKE_TYPEHASH, seller, nonces[seller]++, deadline));
+        require(_signerOf(structHash, v, r, s) == seller, "bad signature");
         _requestUnstake(seller);
     }
 
@@ -160,15 +156,16 @@ contract SellerStakeV2 {
     }
 
     /// Anyone may trigger it once the cooldown is over and no claim is open; the bond only ever goes back to the seller.
-    function withdraw(address seller) external {
+    function withdraw(address seller) external nonReentrant {
         uint256 t = unlockAt[seller];
         require(t != 0 && block.timestamp >= t, "still locked");
-        require(pendingCount[seller] == 0, "claims pending");        uint256 amount = stakeOf[seller];
+        require(pendingCount[seller] == 0, "claims pending");
+        uint256 amount = stakeOf[seller];
         stakeOf[seller] = 0;
         unlockAt[seller] = 0;
         totalStaked -= amount;
         emit Withdrawn(seller, amount);
-        require(usdc.transfer(seller, amount), "transfer failed");
+        SafeERC20.safeTransfer(usdc, seller, amount);
     }
 
     /// The seller (its payTo key) names the hot key that signs its receipts. It cannot be cleared, only replaced, so a seller
@@ -176,8 +173,8 @@ contract SellerStakeV2 {
     function setReceiptSignerWithSig(address seller, address signer, uint256 deadline, uint8 v, bytes32 r, bytes32 s) external {
         require(signer != address(0), "zero signer");
         require(block.timestamp <= deadline, "signature expired");
-        bytes32 digest = _digest(keccak256(abi.encode(RECEIPT_SIGNER_TYPEHASH, seller, signer, nonces[seller]++, deadline)));
-        require(_recover(digest, v, r, s) == seller, "bad signature");
+        bytes32 structHash = keccak256(abi.encode(RECEIPT_SIGNER_TYPEHASH, seller, signer, nonces[seller]++, deadline));
+        require(_signerOf(structHash, v, r, s) == seller, "bad signature");
         emit ReceiptSignerSet(seller, signer, receiptSigner[seller]);
         receiptSigner[seller] = signer;
     }
@@ -217,7 +214,7 @@ contract SellerStakeV2 {
     }
 
     /// Anyone, once the window is over. Pays the buyer what is left of the claim from the bond; 0 still closes the claim.
-    function executeSlash(bytes32 id) external returns (uint256 paid) {
+    function executeSlash(bytes32 id) external nonReentrant returns (uint256 paid) {
         ClaimState storage cl = claims[id];
         require(cl.status == Status.Pending, "not pending");
         require(block.timestamp >= cl.executeAfter, "window open");
@@ -229,7 +226,7 @@ contract SellerStakeV2 {
         stakeOf[seller] = staked - paid;
         totalStaked -= paid;
         emit Slashed(id, seller, cl.buyer, paid);
-        if (paid > 0) require(usdc.transfer(cl.buyer, paid), "transfer failed");
+        if (paid > 0) SafeERC20.safeTransfer(usdc, cl.buyer, paid);
     }
 
     /// Replaces the verifier set, signed by THRESHOLD of the current one.
@@ -252,25 +249,23 @@ contract SellerStakeV2 {
     /// Sorted ascending by signer, so each verifier counts once.
     function _checkVerifierSigs(bytes32 structHash, bytes[] calldata sigs) private view {
         require(sigs.length >= THRESHOLD, "not enough signatures");
-        bytes32 digest = _digest(structHash);
+        bytes32 digest = _hashTypedDataV4(structHash);
         address last = address(0);
         for (uint256 i; i < sigs.length; ++i) {
-            bytes calldata sig = sigs[i];
-            require(sig.length == 65, "bad signature");
-            address signer = _recover(digest, uint8(sig[64]), bytes32(sig[0:32]), bytes32(sig[32:64]));
+            // slither-disable-next-line unused-return (err is checked; the third value only details it)
+            (address signer, ECDSA.RecoverError err,) = ECDSA.tryRecoverCalldata(digest, sigs[i]);
+            require(err == ECDSA.RecoverError.NoError, "bad signature");
             require(signer > last, "signers not sorted");
             require(signer == verifiers[0] || signer == verifiers[1] || signer == verifiers[2], "not a verifier");
             last = signer;
         }
     }
 
-    function _digest(bytes32 structHash) private view returns (bytes32) {
-        return keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
-    }
-
-    function _recover(bytes32 digest, uint8 v, bytes32 r, bytes32 s) private pure returns (address signer) {
-        require(uint256(s) <= HALF_N, "bad signature");
-        signer = ecrecover(digest, v, r, s);
-        require(signer != address(0), "bad signature");
+    /// The signer of `structHash`. Rejects malleable (high-s) signatures and anything that recovers to nobody.
+    function _signerOf(bytes32 structHash, uint8 v, bytes32 r, bytes32 s) private view returns (address signer) {
+        ECDSA.RecoverError err;
+        // slither-disable-next-line unused-return (err is checked; the third value only details it)
+        (signer, err,) = ECDSA.tryRecover(_hashTypedDataV4(structHash), v, r, s);
+        require(err == ECDSA.RecoverError.NoError, "bad signature");
     }
 }

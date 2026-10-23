@@ -1,0 +1,236 @@
+// Full rehearsal of staking on a local copy of Base Sepolia: the real contract build, the real USDC contract, and the
+// server's own relayer, claim worker, HTTP routes and outside verifier. Spends nothing: every transaction stays in anvil,
+// and all keys here are throwaway. What it cannot cover is a live x402 payment, so it makes the USDC payment directly.
+// Usage: npm run stake:dry-run   (needs forge and anvil on PATH; FORK_RPC picks the chain to copy)
+import "dotenv/config";
+import { execFileSync, spawn } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createPublicClient, createTestClient, createWalletClient, encodeAbiParameters, http, keccak256, pad, parseAbi, parseSignature, toHex, type Hex } from "viem";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { baseSepolia } from "viem/chains";
+
+const PORT = 8599;
+const API_PORT = 8598;
+const RPC = `http://127.0.0.1:${PORT}`;
+const API = `http://127.0.0.1:${API_PORT}`;
+const USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e" as const;
+const USDC_BALANCES_SLOT = 9n; // FiatToken v2.2: _balanceAndBlacklistStates
+const SCHEMA = { type: "object", required: ["rate"], properties: { rate: { type: "number" } } };
+const JUNK = '{"rate":"high"}';
+const GOOD = '{"rate":1.2}';
+const PRICE = 1_000n;
+const BOND = 50_000n;
+const START = 1_000_000n;
+
+const fork = process.env.FORK_RPC || process.env.BASE_SEPOLIA_RPC || "https://sepolia.base.org";
+const tmp = mkdtempSync(join(tmpdir(), "gandiva-dry-run-"));
+const key = { deployer: generatePrivateKey(), relayer: generatePrivateKey(), receipt: generatePrivateKey(), seller: generatePrivateKey(), buyer: generatePrivateKey(), v1: generatePrivateKey(), v2: generatePrivateKey(), v3: generatePrivateKey(), v4: generatePrivateKey() };
+const addr = (k: Hex) => privateKeyToAccount(k).address;
+const seller = addr(key.seller);
+const buyer = addr(key.buyer);
+
+const check = (ok: unknown, what: string) => {
+  if (!ok) throw new Error(`FAILED: ${what}`);
+  console.log(`  ok  ${what}`);
+};
+const step = (s: string) => console.log(`\n${s}`);
+
+const anvil = spawn("anvil", ["--fork-url", fork, "--port", String(PORT), "--silent"], { stdio: "ignore" });
+const pub = createPublicClient({ chain: baseSepolia, transport: http(RPC) });
+const test = createTestClient({ mode: "anvil", chain: baseSepolia, transport: http(RPC) });
+const payer = createWalletClient({ account: privateKeyToAccount(key.relayer), chain: baseSepolia, transport: http(RPC) });
+
+const usdcAbi = parseAbi([
+  "function balanceOf(address) view returns (uint256)",
+  "function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter, uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s)",
+]);
+const usdcOf = (a: Hex) => pub.readContract({ address: USDC, abi: usdcAbi, functionName: "balanceOf", args: [a] });
+const warp = async (seconds: number) => {
+  await test.increaseTime({ seconds });
+  await test.mine({ blocks: 1 });
+};
+const fund = async (a: Hex) => {
+  const index = keccak256(encodeAbiParameters([{ type: "address" }, { type: "uint256" }], [a, USDC_BALANCES_SLOT]));
+  await test.setStorageAt({ address: USDC, index, value: pad(toHex(START), { size: 32 }) });
+};
+
+/** The buyer's real USDC payment to the seller, as the x402 facilitator would settle it. */
+async function pay(n: number): Promise<{ nonce: Hex; txHash: Hex }> {
+  const nonce = keccak256(toHex(`payment-${n}`));
+  const message = { from: buyer, to: seller, value: PRICE, validAfter: 0n, validBefore: 9_999_999_999n, nonce };
+  const signature = await privateKeyToAccount(key.buyer).signTypedData({
+    domain: { name: "USDC", version: "2", chainId: baseSepolia.id, verifyingContract: USDC },
+    types: { TransferWithAuthorization: [{ name: "from", type: "address" }, { name: "to", type: "address" }, { name: "value", type: "uint256" }, { name: "validAfter", type: "uint256" }, { name: "validBefore", type: "uint256" }, { name: "nonce", type: "bytes32" }] },
+    primaryType: "TransferWithAuthorization",
+    message,
+  });
+  const { r, s, v, yParity } = parseSignature(signature);
+  const txHash = await payer.writeContract({ address: USDC, abi: usdcAbi, functionName: "transferWithAuthorization", args: [buyer, seller, PRICE, 0n, 9_999_999_999n, nonce, Number(v ?? BigInt(yParity + 27)), r, s] });
+  await pub.waitForTransactionReceipt({ hash: txHash });
+  return { nonce, txHash };
+}
+
+async function main() {
+  step("1. Local chain and contract");
+  for (let i = 0; ; i++) {
+    if (await pub.getChainId().catch(() => null)) break;
+    if (i === 60) throw new Error(`anvil did not start (forking ${fork})`);
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  await test.setBalance({ address: addr(key.deployer), value: 10n ** 18n });
+  await test.setBalance({ address: addr(key.relayer), value: 10n ** 18n });
+  await fund(seller);
+  await fund(buyer);
+  check((await usdcOf(buyer)) === START, "buyer and seller hold real USDC on the copy");
+
+  // The real deploy script. Its record goes to a temp folder so a rehearsal never overwrites the record of a real deploy.
+  const output = execFileSync("forge", ["script", "foundry/script/DeploySellerStakeV2.s.sol", "--rpc-url", RPC, "--private-key", key.deployer, "--broadcast"], {
+    env: { ...process.env, VERIFIER_ADDRESSES: [addr(key.v1), addr(key.v2), addr(key.v3)].join(","), FOUNDRY_BROADCAST: join(tmp, "broadcast") },
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  const contract = output.match(/SellerStakeV2 deployed at (0x[0-9a-fA-F]{40})/)?.[1] as Hex | undefined;
+  check(contract, `deploy script put SellerStakeV2 at ${contract}`);
+
+  // The server code reads these when it loads, so it is imported only now.
+  Object.assign(process.env, {
+    BASE_SEPOLIA_RPC: RPC,
+    DB_PATH: join(tmp, "gandiva.db"),
+    STAKE_CONTRACT: contract,
+    RELAYER_PRIVATE_KEY: key.relayer,
+    SERVER_VERIFIER_KEY: key.v1,
+    RECEIPT_SIGNER_KEY: key.receipt,
+  });
+  const { serve } = await import("@hono/node-server");
+  const { Hono } = await import("hono");
+  const stake = await import("../../src/stake/index.js");
+  const { fileClaim, listClaims, runClaims } = await import("../../src/stake/claims.js");
+  const { saveEvidence } = await import("../../src/stake/evidence.js");
+  const { outputHash, requestHash, schemaHash, signReceipt } = await import("../../src/stake/receipt.js");
+  const { stakeRoutes } = await import("../../src/stake/routes.js");
+  const { claimIdOf, rpcChainView, signRotate } = await import("../../src/stake/verify.js");
+  const { runOnce } = await import("../verifier.js");
+
+  const app = new Hono();
+  app.route("/registry/stake", stakeRoutes);
+  const server = serve({ fetch: app.fetch, port: API_PORT, hostname: "127.0.0.1" });
+
+  const quiet = () => {};
+  const outside = (k: Hex) => runOnce({ url: API, key: k, contract: contract!, chain: rpcChainView(pub as any, contract!), log: quiet });
+  const claimState = (ledgerId: number) => listClaims().find((c) => c.ledgerId === ledgerId)!;
+  const receiptFor = (body: string, nonce: Hex) =>
+    signReceipt(key.receipt, { payTo: seller, payer: buyer, paymentNonce: nonce, requestHash: requestHash("GET", "/fx", ""), outputHash: outputHash(body), schemaHash: schemaHash(SCHEMA), httpStatus: 200 });
+  const evidence = (ledgerId: number, p: { nonce: Hex; txHash: Hex }, body: string | null, receipt: string | null) =>
+    saveEvidence({
+      chainId: baseSepolia.id,
+      ledgerId,
+      serviceId: "dry-run",
+      reason: "output breaks listed schema",
+      payment: { payTo: seller, payer: buyer, amount: PRICE.toString(), nonce: p.nonce, txHash: p.txHash },
+      request: { method: "GET", path: "/fx", body: "" },
+      outputSchema: SCHEMA,
+      response: { status: 200, body, receipt },
+    });
+
+  try {
+    step("2. Seller stakes and registers a receipt signer, gasless");
+    await stake.relayStake(await stake.signStakeWithKey(key.seller, BOND));
+    const typed = await stake.prepareReceiptSigner(seller, addr(key.receipt));
+    const signature = await privateKeyToAccount(key.seller).signTypedData({
+      ...typed,
+      domain: { ...typed.domain, chainId: BigInt(typed.domain.chainId) },
+      message: { seller, signer: addr(key.receipt), nonce: BigInt(typed.message.nonce), deadline: BigInt(typed.message.deadline) },
+    });
+    await stake.relayReceiptSigner({ seller, signer: addr(key.receipt), deadline: typed.message.deadline, signature });
+    const position = await stake.stakeOf(seller, true);
+    check(position.staked === BOND.toString() && position.slashable, "bond is 0.05 USDC and the seller is slashable");
+
+    step("3. Junk answer with a valid receipt: kind 1 claim, refunded");
+    const p1 = await pay(1);
+    fileClaim({ ledgerId: 1, evidence: evidence(1, p1, JUNK, await receiptFor(JUNK, p1.nonce)), seller, buyer });
+    await runClaims(); // the server's own checks
+    await runClaims(); // and its signature
+    check(claimState(1).state === "open" && claimState(1).kind === 1 && claimState(1).signatures.length === 1, "server verifier checked it and signed");
+    check((await outside(key.v2)).signed === 1, "outside verifier re-checked it from the chain and signed");
+    await runClaims();
+    check(claimState(1).state === "proposed", "2 signatures, so the relayer proposed it on chain");
+    const id1 = claimIdOf(seller, buyer, p1.nonce);
+    check(await stake.executeOnChain(id1, seller).then(() => false, () => true), "the contract refuses to execute during the 30 minute window");
+    await warp(1801);
+    await runClaims(Date.now() + 1801_000);
+    check(claimState(1).state === "executed" && claimState(1).paid === PRICE.toString(), "after the window the worker executed it");
+    check((await usdcOf(buyer)) === START - PRICE + PRICE, "the buyer got its money back");
+    check((await stake.stakeOf(seller, true)).staked === (BOND - PRICE).toString(), "the refund came out of the bond");
+
+    step("4. Paid, nothing valid came back: kind 2 claim, seller rebuts it");
+    const p2 = await pay(2);
+    fileClaim({ ledgerId: 2, evidence: evidence(2, p2, null, null), seller, buyer });
+    await runClaims();
+    await runClaims();
+    check(claimState(2).state === "open" && claimState(2).kind === 2, "kind 2 claim opened");
+    await outside(key.v2);
+    await runClaims();
+    check(claimState(2).state === "proposed", "proposed on chain");
+    const rebut = await fetch(`${API}/registry/stake/claims/${claimState(2).id}/rebuttal`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ receipt: await receiptFor(GOOD, p2.nonce), body: GOOD }) });
+    check(rebut.ok, "the seller's rebuttal was accepted over HTTP");
+    await runClaims();
+    check((await outside(key.v2)).vetoed === 1, "outside verifier checked the rebuttal and signed a veto");
+    await runClaims();
+    check(claimState(2).state === "vetoed", "2 veto signatures closed the claim on chain");
+    check((await stake.stakeOf(seller, true)).staked === (BOND - PRICE).toString(), "the bond was not touched");
+
+    step("5. Verifier rotation");
+    const set = [addr(key.v1), addr(key.v2), addr(key.v4)] as [Hex, Hex, Hex];
+    const rotation = { set, nonce: 0n, deadline: BigInt(Math.floor(Date.now() / 1000) + 86_400) };
+    const signers = [key.v1, key.v2].sort((a, b) => (BigInt(addr(a)) < BigInt(addr(b)) ? -1 : 1));
+    await stake.rotateOnChain(set, rotation.deadline, await Promise.all(signers.map((k) => signRotate(k, rotation, contract!))));
+    check((await stake.verifierSet()).includes(addr(key.v4)) && !(await stake.verifierSet()).includes(addr(key.v3)), "verifier 3 is out, verifier 4 is in");
+
+    step("6. A rotated-out key, and a bond held back by an open claim");
+    const p3 = await pay(3);
+    fileClaim({ ledgerId: 3, evidence: evidence(3, p3, JUNK, await receiptFor(JUNK, p3.nonce)), seller, buyer });
+    await runClaims();
+    await runClaims();
+    check((await outside(key.v3)).failed === 1 && claimState(3).signatures.length === 1, "the server refused the rotated-out verifier's signature");
+    check((await outside(key.v4)).signed === 1, "the new verifier's signature counted");
+    await runClaims();
+    check(claimState(3).state === "proposed", "proposed on chain");
+
+    const unstake = await stake.prepareUnstake(seller);
+    const unstakeSig = await privateKeyToAccount(key.seller).signTypedData({
+      ...unstake,
+      domain: { ...unstake.domain, chainId: BigInt(unstake.domain.chainId) },
+      message: { seller, nonce: BigInt(unstake.message.nonce), deadline: BigInt(unstake.message.deadline) },
+    });
+    await stake.relayUnstake({ seller, deadline: unstake.message.deadline, signature: unstakeSig });
+    await warp(7201);
+    check(await stake.withdrawFor(seller).then(() => false, () => true), "withdraw is refused while the claim is open");
+    await runClaims(Date.now() + 9100_000);
+    check(claimState(3).state === "executed", "the claim executed");
+    await stake.withdrawFor(seller);
+
+    step("7. The money adds up");
+    const refunds = 2n * PRICE;
+    check((await usdcOf(buyer)) === START - 3n * PRICE + refunds, "buyer: paid 3 times, refunded twice");
+    check((await usdcOf(seller)) === START + 3n * PRICE - refunds, "seller: got 3 payments, its bond paid 2 refunds, the rest came back");
+    check((await usdcOf(contract!)) === 0n, "the contract holds nothing");
+  } finally {
+    server.close();
+  }
+}
+
+try {
+  await main();
+  console.log("\nDRY RUN PASSED: nothing was spent.");
+} catch (err: any) {
+  console.error(`\n${err?.shortMessage ?? err?.message ?? err}`);
+  process.exitCode = 1;
+} finally {
+  anvil.kill();
+  try {
+    rmSync(tmp, { recursive: true, force: true });
+  } catch {} // Windows may still hold the database file; it is in the temp folder either way
+}
+process.exit();

@@ -2,7 +2,8 @@
 
 Sellers can lock testnet USDC as a bond behind their listings. If a seller is paid and sends back junk, the bond refunds that buyer. No single key can take a bond: a refund needs signatures from 2 of 3 independent verifiers, is capped, and waits out a window in which it can still be vetoed.
 
-- Contract: `contracts/SellerStakeV2.sol` (Base Sepolia, testnet only)
+- Contract: `contracts/SellerStakeV2.sol` (Base Sepolia, testnet only; signatures, EIP-712 and token calls from OpenZeppelin)
+- Contract tests and deploy script: `foundry/`, built with Foundry
 - Server: `src/stake/` (relayer, claims worker, receipts, evidence, verifier checks)
 - Outside verifier: `scripts/verifier.ts`, run on a schedule by `.github/workflows/verifier.yml`
 - UI: the **Stake** card on the Sell tab
@@ -89,7 +90,16 @@ Sign after the payment settles, over the exact bytes you send. `src/stake/receip
    - `SERVER_VERIFIER_KEY` and `VERIFIER_KEY`: two verifier keys for local testing.
 
    In production, give each of the 3 verifiers its own fresh key, created on its own host. If one machine holds 2 verifier keys, that machine alone can pass a slash.
-2. **Deploy:** set `VERIFIER_ADDRESSES` in `.env` to the 3 verifier addresses (comma-separated), then run `npm run stake:deploy`. This writes `STAKE_CONTRACT` into `.env`.
+2. **Deploy (spends testnet ETH):** the deployer needs a key only for this one transaction and has no powers afterwards. Keep it in Foundry's encrypted keystore, not in `.env`:
+   ```
+   cast wallet new
+   cast wallet import gandiva-deployer --interactive
+   ```
+   Send that address a little Base Sepolia ETH. Set `VERIFIER_ADDRESSES` to the 3 verifier addresses (comma-separated), then:
+   ```
+   forge script foundry/script/DeploySellerStakeV2.s.sol --rpc-url https://sepolia.base.org --account gandiva-deployer --broadcast
+   ```
+   The script refuses every chain except Base Sepolia. Put the address it prints in `STAKE_CONTRACT`, and commit the record it writes under `foundry/broadcast/`.
 3. **Server (verifier 1):** on Render, set `STAKE_CONTRACT`, `RELAYER_PRIVATE_KEY`, `RECEIPT_SIGNER_KEY` and `SERVER_VERIFIER_KEY`, then deploy. Without `RELAYER_PRIVATE_KEY` staking stays off.
 4. **GitHub Actions (verifier 2):** in Settings, Secrets and variables, Actions:
    - secret `VERIFIER_KEY`;
@@ -99,6 +109,19 @@ Sign after the payment settles, over the exact bytes you send. `src/stake/receip
    The workflow runs every 5 minutes, and is skipped while `STAKE_CONTRACT` is empty. Scheduled runs can start late.
 5. **Your machine (verifier 3):** `npm run verifier` checks every 60 s, or `npm run verifier -- --once` runs one pass. Set `VERIFIER_KEY`, `STAKE_CONTRACT` and `GANDIVA_URL`.
 6. **Seed the built-in sellers:** `npm run stake:seed`, with the server running, registers `RECEIPT_SIGNER_KEY` for each built-in seller and stakes part of its earnings. **It spends testnet USDC.**
+
+## Testing the contract
+
+None of these spend anything. `forge` and `anvil` come from [Foundry](https://getfoundry.sh); clone with `--recurse-submodules`, or run `git submodule update --init`, to get `lib/`.
+
+| Command | What it checks |
+|---|---|
+| `forge test` | Every contract rule, fuzzing, and invariants: random call sequences against a plain model, so that the bonds always add up, no claim pays twice and no refund passes the cap |
+| `$env:FORK_RPC="https://sepolia.base.org"; forge test` | The same, plus a bond's whole life against the real USDC contract on a local copy of the chain |
+| `npm run stake:dry-run` | The deploy script, relayer, claim worker, HTTP routes and outside verifier together on a local copy of the chain: both claim kinds, a veto, a rotation, a held withdrawal, and the final balances |
+| `npm run stake:compile` | Rebuilds `contracts/SellerStakeV2.json`. Run it after changing the contract; CI fails if the file is stale |
+
+CI runs all of these, plus Slither and Aderyn. The contract has not had a paid audit, so it stays on testnet.
 
 ## API
 

@@ -27,6 +27,8 @@ contract StakeHandler is StakeSigning {
     uint256 public constant MAX = 100_000;
     uint256 public constant WINDOW = 30 minutes;
     uint256 public constant COOLDOWN = 2 hours;
+    uint256 public constant FEE = 20_000;
+    uint256 public constant SLOTS = 3;
 
     MockUSDC public immutable usdc;
     SellerStakeV2 public immutable stake;
@@ -39,12 +41,15 @@ contract StakeHandler is StakeSigning {
     mapping(address => uint256) public modelStake;
     mapping(address => uint256) public modelUnlock;
     mapping(address => uint256) public modelPending;
+    mapping(address => uint256[]) private proposedAt;
     mapping(bytes32 => Ghost) public ghosts;
     bytes32[] public ids;
     uint256 public deposited;
     uint256 public withdrawn;
     uint256 public refunded;
+    uint256 public feesPaid;
     uint256 public largestRefund;
+    uint256 public mostInAWindow;
     string public broken;
     uint256 private nonce;
 
@@ -63,7 +68,7 @@ contract StakeHandler is StakeSigning {
         }
         current = [0, 1, 2];
         usdc = new MockUSDC();
-        stake = new SellerStakeV2(IUSDC(address(usdc)), [_verifier(0), _verifier(1), _verifier(2)], COOLDOWN);
+        stake = new SellerStakeV2(IUSDC(address(usdc)), [_verifier(0), _verifier(1), _verifier(2)], COOLDOWN, FEE, FEE);
         for (uint256 i; i < 3; ++i) {
             (sellers[i], sellerKeys[i]) = makeAddrAndKey(string.concat("seller-", vm.toString(i)));
             usdc.mint(sellers[i], 1e12);
@@ -85,13 +90,33 @@ contract StakeHandler is StakeSigning {
         if (!ok && bytes(broken).length == 0) broken = what;
     }
 
+    /// The slash fee the model expects: what is set, or what the bond still holds. Checks the sender got it.
+    function _modelFee(address s, uint256 feesBefore) private returns (uint256 fee) {
+        uint256 left = modelStake[s];
+        fee = FEE < left ? FEE : left;
+        modelStake[s] = left - fee;
+        feesPaid += fee;
+        _check(usdc.balanceOf(address(this)) - feesBefore == fee, "paid the sender the wrong fee");
+    }
+
+    /// How many claims against `s` were proposed in the last window: each of them still holds a slot.
+    function _recentClaims(address s) private view returns (uint256 count) {
+        uint256[] storage times = proposedAt[s];
+        for (uint256 i = times.length; i > 0 && block.timestamp < times[i - 1] + WINDOW; --i) {
+            count++;
+        }
+    }
+
     function stakeBond(uint256 who, uint256 value) external {
         address s = sellers[who % 3];
-        value = bound(value, 1, 60_000);
+        value = bound(value, FEE + 1, FEE + 60_000);
+        uint256 feesBefore = usdc.balanceOf(address(this));
         stake.stakeWithAuthorization(s, value, 0, block.timestamp + 1 hours, bytes32(++nonce), 27, 0, 0);
-        modelStake[s] += value;
+        _check(usdc.balanceOf(address(this)) - feesBefore == FEE, "stake paid the sender the wrong fee");
+        modelStake[s] += value - FEE;
         modelUnlock[s] = 0;
         deposited += value;
+        feesPaid += FEE;
         staked++;
     }
 
@@ -156,11 +181,13 @@ contract StakeHandler is StakeSigning {
 
         bytes32 id = stake.claimId(c.seller, c.buyer, c.paymentNonce);
         bool allowed = inSet && count >= 2 && c.amount > 0 && c.amount <= MAX && (c.kind == 1 || c.kind == 2) && s != sellers[2]
-            && ghosts[id].state == State.None;
+            && ghosts[id].state == State.None && _recentClaims(s) < SLOTS;
         try stake.proposeSlash(c, _sigs(stake, keys, _claimHash(c))) {
             _check(allowed, "accepted a claim it should have refused");
             ghosts[id] = Ghost(s, c.amount, block.timestamp + WINDOW, State.Pending);
             ids.push(id);
+            proposedAt[s].push(block.timestamp);
+            mostInAWindow = _recentClaims(s) > mostInAWindow ? _recentClaims(s) : mostInAWindow;
             modelPending[s]++;
             proposed++;
         } catch {
@@ -176,10 +203,12 @@ contract StakeHandler is StakeSigning {
         uint256 deadline = block.timestamp + 10 minutes;
         bytes[] memory sigs = _sigs(stake, _pair(verifierKeys[current[1]], verifierKeys[current[2]]), _vetoHash(id, deadline));
         bool allowed = g.state == State.Pending;
+        uint256 feesBefore = usdc.balanceOf(address(this));
         try stake.vetoSlash(id, deadline, sigs) {
             _check(allowed, "vetoed a closed claim");
             g.state = State.Vetoed;
             modelPending[g.seller]--;
+            _modelFee(g.seller, feesBefore);
             vetoed++;
         } catch {
             _check(!allowed, "refused a valid veto");
@@ -192,6 +221,7 @@ contract StakeHandler is StakeSigning {
         bytes32 id = ids[pick % ids.length];
         Ghost storage g = ghosts[id];
         uint256 before = usdc.balanceOf(buyer);
+        uint256 feesBefore = usdc.balanceOf(address(this));
         bool allowed = g.state == State.Pending && block.timestamp >= g.executeAfter;
         try stake.executeSlash(id) returns (uint256 paid) {
             _check(allowed, "executed a claim it should have held");
@@ -201,6 +231,7 @@ contract StakeHandler is StakeSigning {
             modelStake[g.seller] = left - paid;
             modelPending[g.seller]--;
             g.state = State.Executed;
+            _modelFee(g.seller, feesBefore);
             refunded += paid;
             if (paid > largestRefund) largestRefund = paid;
             executed++;
@@ -262,7 +293,12 @@ contract SellerStakeV2InvariantTest is StakeSigning {
     }
 
     function invariant_NoMoneyAppearsOrVanishes() public view {
-        assertEq(handler.deposited(), _stake().totalStaked() + handler.withdrawn() + handler.refunded());
+        assertEq(handler.deposited(), _stake().totalStaked() + handler.withdrawn() + handler.refunded() + handler.feesPaid());
+    }
+
+    /// The handler sends every call, so every fee must have reached it and nowhere else.
+    function invariant_EveryFeeReachedTheSender() public view {
+        assertEq(handler.usdc().balanceOf(address(handler)), handler.feesPaid());
     }
 
     function invariant_BondsAndPendingCountsMatchTheModel() public view {
@@ -276,6 +312,10 @@ contract SellerStakeV2InvariantTest is StakeSigning {
 
     function invariant_NoRefundAboveTheCap() public view {
         assertLe(handler.largestRefund(), handler.MAX());
+    }
+
+    function invariant_NoSellerGetsMoreClaimsThanItsSlotsInAWindow() public view {
+        assertLe(handler.mostInAWindow(), handler.SLOTS());
     }
 
     /// A seller with no receipt signer can never lose money or have a claim open.

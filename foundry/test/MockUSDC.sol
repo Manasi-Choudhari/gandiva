@@ -36,7 +36,8 @@ contract MockUSDC {
     }
 }
 
-/// A hostile token that calls back into the stake contract while it pays out.
+/// A hostile token that calls back into the stake contract, once, while it pays out. Once only, so a test can tell which
+/// guard stopped it: a repeat attack from inside the first would trip the inner call's own guard instead.
 contract ReentrantUSDC is MockUSDC {
     address private target;
     bytes private attack;
@@ -48,7 +49,9 @@ contract ReentrantUSDC is MockUSDC {
 
     function transfer(address to, uint256 value) public override returns (bool) {
         if (target != address(0)) {
-            (bool ok, bytes memory data) = target.call(attack);
+            address victim = target;
+            target = address(0);
+            (bool ok, bytes memory data) = victim.call(attack);
             if (!ok) {
                 assembly ("memory-safe") {
                     revert(add(data, 0x20), mload(data))

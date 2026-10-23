@@ -159,16 +159,33 @@ beforeEach(async () => {
   now = 1_800_000_000n;
   authN = 0;
   usdcAddr = await deploy(artifacts.usdc);
-  stakeAddr = await deploy(artifacts.stake, [usdcAddr, V.map((a) => a.address), COOLDOWN]);
+  stakeAddr = await deploy(artifacts.stake, [usdcAddr, V.map((a) => a.address), COOLDOWN, 0n, 0n]);
   await U(deployer.address, "mint", [seller.address, 1_000_000n]);
 });
 
 describe("SellerStakeV2", () => {
   it("refuses a cooldown shorter than the claim deadline plus the window, and a bad verifier set", async () => {
     const vs = V.map((a) => a.address);
-    await expect(deploy(artifacts.stake, [usdcAddr, vs, 5400n])).rejects.toThrow(/cooldown too short/);
-    await expect(deploy(artifacts.stake, [usdcAddr, [vs[0], vs[0], vs[2]], COOLDOWN])).rejects.toThrow(/duplicate verifier/);
-    await expect(deploy(artifacts.stake, [usdcAddr, [vs[0], vs[1], "0x0000000000000000000000000000000000000000"], COOLDOWN])).rejects.toThrow(/zero verifier/);
+    await expect(deploy(artifacts.stake, [usdcAddr, vs, 5400n, 0n, 0n])).rejects.toThrow(/cooldown too short/);
+    await expect(deploy(artifacts.stake, [usdcAddr, [vs[0], vs[0], vs[2]], COOLDOWN, 0n, 0n])).rejects.toThrow(/duplicate verifier/);
+    await expect(deploy(artifacts.stake, [usdcAddr, [vs[0], vs[1], "0x0000000000000000000000000000000000000000"], COOLDOWN, 0n, 0n])).rejects.toThrow(/zero verifier/);
+    await expect(deploy(artifacts.stake, [usdcAddr, vs, COOLDOWN, MAX + 1n, 0n])).rejects.toThrow(/fee too high/);
+  });
+
+  it("pays each fee to whoever sent the transaction, after the buyer's refund", async () => {
+    stakeAddr = await deploy(artifacts.stake, [usdcAddr, V.map((a) => a.address), COOLDOWN, 20_000n, 20_000n]);
+    await register();
+    await stake(120_000n); // 0.10 bond + 0.02 fee
+    expect(await usdcOf(relayer.address)).toBe(20_000n);
+    expect(await S(relayer.address, "stakeOf", [seller.address])).toBe(100_000n);
+    const c = claim();
+    await propose(c);
+    now += WINDOW;
+    expect(await S(outsider.address, "executeSlash", [await idOf(c)])).toBe(40_000n);
+    expect(await usdcOf(buyer.address)).toBe(40_000n);
+    expect(await usdcOf(outsider.address)).toBe(20_000n);
+    expect(await S(relayer.address, "stakeOf", [seller.address])).toBe(40_000n);
+    expect(await usdcOf(stakeAddr)).toBe(40_000n);
   });
 
   it("registers a receipt signer from the seller's gasless signature, once", async () => {
@@ -422,7 +439,8 @@ async function fuzz(seed: number, steps: number) {
       const c = claim({ seller: s.address, amount: BigInt(1 + int(120_000)), paymentNonce: nonce(int(6)), kind: 1 + int(2) });
       const id = await idOf(c);
       const res = await attempt("proposeSlash", [c, await sigs(signers, "Claim", c)]);
-      expect(res.ok, `${where} ${res.r}`).toBe(signers.length >= 2 && c.amount <= MAX && slashable.has(s.address) && !claims.has(id));
+      const holdingSlots = [...claims.values()].filter((x) => x.seller === s.address && x.executeAfter > now).length;
+      expect(res.ok, `${where} ${res.r}`).toBe(signers.length >= 2 && c.amount <= MAX && slashable.has(s.address) && !claims.has(id) && holdingSlots < 3);
       if (res.ok) {
         claims.set(id, { seller: s.address, amount: c.amount, executeAfter: now + WINDOW, status: "pending" });
         done.proposed++;

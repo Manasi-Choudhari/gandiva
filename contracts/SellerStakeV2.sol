@@ -25,15 +25,25 @@ interface IUSDC is IERC20 {
 /// Sellers lock USDC as a bond behind their listings. A slash needs signatures from 2 of 3 independent verifiers, is capped
 /// at 0.10 USDC, waits out a 30 minute window in which the verifiers can veto it, and refunds the harmed buyer. There is no
 /// owner or arbiter: the verifier set changes only by 2-of-3 of itself, and every call can be relayed by anyone, so sellers
-/// never need gas.
+/// never need gas. Fees repay whoever sends the transaction, so a relayer can break even and a seller that sends its own
+/// stake pays no fee. They are fixed at deploy, so nobody can raise them later.
 contract SellerStakeV2 is EIP712, ReentrancyGuardTransient {
     IUSDC public immutable usdc;
     /// Delay between asking to unstake and withdrawing. Longer than the claim deadline plus the window, so a seller cannot
     /// pull its bond ahead of a claim for its last sale.
     uint256 public immutable cooldown;
+    /// Taken from each stake. It prepays the gas of that stake, its unstake and withdraw, and a receipt signer.
+    uint256 public immutable stakeFee;
+    /// Taken from the bond when a claim closes on chain, after the buyer's refund, for the gas of that claim.
+    uint256 public immutable slashFee;
 
     // Slither "timestamp" is accepted: deadlines and windows are minutes to hours, validators can only skew seconds.
     uint256 public constant MAX_SLASH = 100_000; // 0.10 USDC, the per-call price cap
+    uint256 public constant MAX_FEE = 100_000; // 0.10 USDC
+    /// The contract cannot tell a real payment from a made-up one, so 2 stolen verifier keys could otherwise open any number
+    /// of claims and empty a bond after one window. A seller has this many slots, each held for the whole window of the claim
+    /// that took it, even if that claim is vetoed: otherwise propose-and-veto would take a fee per loop with no wait at all.
+    uint256 public constant CLAIMS_PER_WINDOW = 3;
     uint256 public constant SLASH_DELAY = 30 minutes;
     /// Verifiers only sign claims filed within this long after the payment (checked off chain).
     uint256 public constant CLAIM_DEADLINE = 1 hours;
@@ -90,6 +100,9 @@ contract SellerStakeV2 is EIP712, ReentrancyGuardTransient {
     /// Keyed by claimId(seller, buyer, paymentNonce), so a payment can back at most one claim, ever.
     mapping(bytes32 => ClaimState) public claims;
     mapping(address => uint256) public pendingCount;
+    /// When each of a seller's claim slots comes free; 0 is free from the start.
+    // slither-disable-next-line uninitialized-state (_takeSlot writes it through a storage pointer, which Slither misses)
+    mapping(address => uint256[CLAIMS_PER_WINDOW]) private slotFreeAt;
 
     event Staked(address indexed seller, uint256 amount, uint256 total);
     event UnstakeRequested(address indexed seller, uint256 unlockAt);
@@ -101,12 +114,18 @@ contract SellerStakeV2 is EIP712, ReentrancyGuardTransient {
     );
     event SlashVetoed(bytes32 indexed id);
     event Slashed(bytes32 indexed id, address indexed seller, address indexed to, uint256 amount);
+    event FeePaid(address indexed seller, address indexed to, uint256 amount);
     event VerifiersRotated(address[3] verifiers, uint256 rotationNonce);
 
-    constructor(IUSDC usdc_, address[3] memory verifiers_, uint256 cooldown_) EIP712("Gandiva SellerStake", "2") {
+    constructor(IUSDC usdc_, address[3] memory verifiers_, uint256 cooldown_, uint256 stakeFee_, uint256 slashFee_)
+        EIP712("Gandiva SellerStake", "2")
+    {
         require(cooldown_ > CLAIM_DEADLINE + SLASH_DELAY, "cooldown too short");
+        require(stakeFee_ <= MAX_FEE && slashFee_ <= MAX_FEE, "fee too high");
         usdc = usdc_;
         cooldown = cooldown_;
+        stakeFee = stakeFee_;
+        slashFee = slashFee_;
         _setVerifiers(verifiers_);
     }
 
@@ -117,7 +136,8 @@ contract SellerStakeV2 is EIP712, ReentrancyGuardTransient {
 
     // ---- staking (same as V1, except withdraw waits for open claims) ----
 
-    /// Pulls `value` USDC from `seller` with its signed ReceiveWithAuthorization (to = this contract). Staking again cancels a pending unstake.
+    /// Pulls `value` USDC from `seller` with its signed ReceiveWithAuthorization (to = this contract). `stakeFee` of it goes to
+    /// the sender and the rest becomes bond. Staking again cancels a pending unstake.
     function stakeWithAuthorization(
         address seller,
         uint256 value,
@@ -128,13 +148,15 @@ contract SellerStakeV2 is EIP712, ReentrancyGuardTransient {
         bytes32 r,
         bytes32 s
     ) external nonReentrant {
-        require(value > 0, "zero stake");
-        stakeOf[seller] += value;
-        totalStaked += value;
+        require(value > stakeFee, "stake below fee");
+        uint256 bond = value - stakeFee;
+        stakeOf[seller] += bond;
+        totalStaked += bond;
         unlockAt[seller] = 0;
-        emit Staked(seller, value, stakeOf[seller]);
+        emit Staked(seller, bond, stakeOf[seller]);
         // Effects first; if USDC refuses the authorisation the whole call reverts.
         usdc.receiveWithAuthorization(seller, address(this), value, validAfter, validBefore, nonce, v, r, s);
+        _payFee(seller, stakeFee);
     }
 
     /// Starts the cooldown with the seller's EIP-712 Unstake signature (relayed by anyone).
@@ -197,23 +219,30 @@ contract SellerStakeV2 is EIP712, ReentrancyGuardTransient {
         // Claim has only static fields, so abi.encode(c) is exactly the EIP-712 encoding of its members.
         _checkVerifierSigs(keccak256(abi.encode(CLAIM_TYPEHASH, c)), sigs);
         uint256 executeAfter = block.timestamp + SLASH_DELAY;
+        _takeSlot(c.seller, executeAfter);
         claims[id] = ClaimState(c.seller, c.buyer, c.amount, executeAfter, Status.Pending);
         pendingCount[c.seller]++;
         emit SlashProposed(id, c.seller, c.buyer, c.amount, c.evidence, c.kind, executeAfter);
     }
 
-    /// Cancels an open claim: during the window (the seller rebutted it), or after it if the refund cannot be paid.
-    function vetoSlash(bytes32 id, uint256 deadline, bytes[] calldata sigs) external {
+    /// Cancels an open claim: during the window (the seller rebutted it), or after it if the refund cannot be paid. The slash
+    /// fee still applies: a rebutted claim means the seller's receipt never reached the buyer, and without a fee a seller
+    /// could hold receipts back and rebut every claim at the relayer's expense.
+    function vetoSlash(bytes32 id, uint256 deadline, bytes[] calldata sigs) external nonReentrant {
         require(block.timestamp <= deadline, "signature expired");
         ClaimState storage cl = claims[id];
         require(cl.status == Status.Pending, "not pending");
         _checkVerifierSigs(keccak256(abi.encode(VETO_TYPEHASH, id, deadline)), sigs);
         cl.status = Status.Vetoed;
-        pendingCount[cl.seller]--;
+        address seller = cl.seller;
+        pendingCount[seller]--;
+        uint256 fee = _takeSlashFee(seller);
         emit SlashVetoed(id);
+        _payFee(seller, fee);
     }
 
-    /// Anyone, once the window is over. Pays the buyer what is left of the claim from the bond; 0 still closes the claim.
+    /// Anyone, once the window is over. Pays the buyer what is left of the claim from the bond, then the sender its fee from
+    /// whatever remains; 0 still closes the claim.
     function executeSlash(bytes32 id) external nonReentrant returns (uint256 paid) {
         ClaimState storage cl = claims[id];
         require(cl.status == Status.Pending, "not pending");
@@ -225,8 +254,10 @@ contract SellerStakeV2 is EIP712, ReentrancyGuardTransient {
         paid = cl.amount < staked ? cl.amount : staked;
         stakeOf[seller] = staked - paid;
         totalStaked -= paid;
+        uint256 fee = _takeSlashFee(seller);
         emit Slashed(id, seller, cl.buyer, paid);
         if (paid > 0) SafeERC20.safeTransfer(usdc, cl.buyer, paid);
+        _payFee(seller, fee);
     }
 
     /// Replaces the verifier set, signed by THRESHOLD of the current one.
@@ -238,6 +269,31 @@ contract SellerStakeV2 is EIP712, ReentrancyGuardTransient {
     }
 
     // ---- internals ----
+
+    function _takeSlot(address seller, uint256 until) private {
+        uint256[CLAIMS_PER_WINDOW] storage slots = slotFreeAt[seller];
+        for (uint256 i; i < CLAIMS_PER_WINDOW; ++i) {
+            if (slots[i] <= block.timestamp) {
+                slots[i] = until;
+                return;
+            }
+        }
+        revert("too many claims");
+    }
+
+    /// Moves the slash fee out of the bond, or all of the bond if less is left.
+    function _takeSlashFee(address seller) private returns (uint256 fee) {
+        uint256 staked = stakeOf[seller];
+        fee = slashFee < staked ? slashFee : staked;
+        stakeOf[seller] = staked - fee;
+        totalStaked -= fee;
+    }
+
+    function _payFee(address seller, uint256 fee) private {
+        if (fee == 0) return;
+        emit FeePaid(seller, msg.sender, fee);
+        SafeERC20.safeTransfer(usdc, msg.sender, fee);
+    }
 
     function _setVerifiers(address[3] memory set) private {
         require(set[0] != address(0) && set[1] != address(0) && set[2] != address(0), "zero verifier");

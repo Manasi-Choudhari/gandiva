@@ -13,9 +13,10 @@ contract SellerStakeV2Test is StakeSigning {
     uint256 internal constant COOLDOWN = 2 hours;
     uint256 internal constant WINDOW = 30 minutes;
     uint256 internal constant MAX = 100_000;
+    uint256 internal constant FEE = 20_000;
 
     MockUSDC internal usdc;
-    SellerStakeV2 internal stake;
+    SellerStakeV2 internal stake; // no fees: the rules below are about the bond, and the fee tests deploy their own
     uint256[3] internal keys;
     address[3] internal vs;
     address internal seller;
@@ -36,7 +37,16 @@ contract SellerStakeV2Test is StakeSigning {
     }
 
     function _deploy(MockUSDC token) private returns (SellerStakeV2) {
-        return new SellerStakeV2(IUSDC(address(token)), vs, COOLDOWN);
+        return new SellerStakeV2(IUSDC(address(token)), vs, COOLDOWN, 0, 0);
+    }
+
+    /// A contract with fees, bonded `value` by the seller through `relayer`, ready to be slashed.
+    function _withFees(address relayer, uint256 value) private returns (SellerStakeV2 target) {
+        target = new SellerStakeV2(IUSDC(address(usdc)), vs, COOLDOWN, FEE, FEE);
+        stake = target;
+        _register(target, seller, sellerKey, receiptKey);
+        vm.prank(relayer);
+        target.stakeWithAuthorization(seller, value, 0, block.timestamp + 1 hours, bytes32(++authNonce), 27, 0, 0);
     }
 
     function _stake(uint256 value) private {
@@ -96,11 +106,22 @@ contract SellerStakeV2Test is StakeSigning {
     function test_RefusesShortCooldownAndBadVerifierSet() public {
         IUSDC token = IUSDC(address(usdc));
         vm.expectRevert("cooldown too short");
-        new SellerStakeV2(token, vs, 90 minutes);
+        new SellerStakeV2(token, vs, 90 minutes, 0, 0);
         vm.expectRevert("duplicate verifier");
-        new SellerStakeV2(token, [vs[0], vs[0], vs[2]], COOLDOWN);
+        new SellerStakeV2(token, [vs[0], vs[0], vs[2]], COOLDOWN, 0, 0);
         vm.expectRevert("zero verifier");
-        new SellerStakeV2(token, [vs[0], vs[1], address(0)], COOLDOWN);
+        new SellerStakeV2(token, [vs[0], vs[1], address(0)], COOLDOWN, 0, 0);
+    }
+
+    function test_RefusesAFeeAboveTheCap() public {
+        IUSDC token = IUSDC(address(usdc));
+        vm.expectRevert("fee too high");
+        new SellerStakeV2(token, vs, COOLDOWN, MAX + 1, 0);
+        vm.expectRevert("fee too high");
+        new SellerStakeV2(token, vs, COOLDOWN, 0, MAX + 1);
+        SellerStakeV2 atCap = new SellerStakeV2(token, vs, COOLDOWN, MAX, MAX);
+        assertEq(atCap.stakeFee(), MAX);
+        assertEq(atCap.slashFee(), MAX);
     }
 
     function test_DeployScript_RefusesAnyChainButBaseSepolia() public {
@@ -329,6 +350,186 @@ contract SellerStakeV2Test is StakeSigning {
         assertEq(stake.pendingCount(seller), 0);
     }
 
+    function test_TwoStolenKeysCannotEmptyABondInOneWindow() public {
+        _bonded(1_000_000);
+        for (uint256 i = 1; i <= 3; ++i) {
+            _propose(_claim(bytes32(i), MAX));
+        }
+        SellerStakeV2.Claim memory fourth = _claim(bytes32(uint256(4)), MAX);
+        bytes[] memory sigs = _sigs(stake, _pair(keys[0], keys[1]), _claimHash(fourth));
+        vm.expectRevert("too many claims");
+        stake.proposeSlash(fourth, sigs);
+
+        vm.warp(block.timestamp + WINDOW);
+        for (uint256 i = 1; i <= 3; ++i) {
+            stake.executeSlash(stake.claimId(seller, buyer, bytes32(i)));
+        }
+        assertEq(stake.stakeOf(seller), 1_000_000 - 3 * MAX);
+    }
+
+    /// Each veto pays a fee to its sender, so if a veto freed a slot, 2 stolen keys could loop propose and veto in one block.
+    function test_TwoStolenKeysCannotDrainABondByVetoingTheirOwnClaims() public {
+        SellerStakeV2 target = _withFees(makeAddr("relayer"), 520_000); // bond 500 000
+        address thief = makeAddr("thief");
+        for (uint256 i = 1; i <= 3; ++i) {
+            bytes32 id = _propose(_claim(bytes32(i), 1));
+            uint256 deadline = block.timestamp + 10 minutes;
+            bytes[] memory sigs = _sigs(target, _pair(keys[0], keys[2]), _vetoHash(id, deadline));
+            vm.prank(thief);
+            target.vetoSlash(id, deadline, sigs);
+        }
+        assertEq(target.pendingCount(seller), 0);
+        SellerStakeV2.Claim memory next = _claim(bytes32(uint256(4)), 1);
+        bytes[] memory claimSigs = _sigs(target, _pair(keys[0], keys[1]), _claimHash(next));
+        vm.expectRevert("too many claims");
+        target.proposeSlash(next, claimSigs);
+        assertEq(usdc.balanceOf(thief), 3 * FEE);
+        assertEq(target.stakeOf(seller), 500_000 - 3 * FEE);
+    }
+
+    function test_ASlotComesBackOnlyWhenItsWindowEnds() public {
+        _bonded(1_000_000);
+        for (uint256 i = 1; i <= 3; ++i) {
+            _propose(_claim(bytes32(i), MAX));
+        }
+        vm.warp(block.timestamp + WINDOW - 1);
+        SellerStakeV2.Claim memory early = _claim(bytes32(uint256(4)), MAX);
+        bytes[] memory sigs = _sigs(stake, _pair(keys[0], keys[1]), _claimHash(early));
+        vm.expectRevert("too many claims");
+        stake.proposeSlash(early, sigs);
+
+        vm.warp(block.timestamp + 1);
+        for (uint256 i = 4; i <= 6; ++i) {
+            _propose(_claim(bytes32(i), MAX));
+        }
+        assertEq(stake.pendingCount(seller), 6);
+    }
+
+    function test_TheCapIsPerSeller() public {
+        _bonded(1_000_000);
+        for (uint256 i = 1; i <= 3; ++i) {
+            _propose(_claim(bytes32(i), MAX));
+        }
+        (address other, uint256 otherKey) = makeAddrAndKey("other seller");
+        _register(stake, other, otherKey, receiptKey);
+        SellerStakeV2.Claim memory c = _claim(bytes32(uint256(9)), MAX);
+        c.seller = other;
+        _propose(c);
+        assertEq(stake.pendingCount(other), 1);
+    }
+
+    // ---- fees ----
+
+    function test_Fee_StakeSplitsIntoBondAndSenderFee() public {
+        address relayer = makeAddr("relayer");
+        SellerStakeV2 target = _withFees(relayer, 70_000);
+        assertEq(usdc.balanceOf(relayer), FEE);
+        assertEq(target.stakeOf(seller), 50_000);
+        assertEq(target.totalStaked(), 50_000);
+        assertEq(usdc.balanceOf(seller), 930_000);
+        assertEq(usdc.balanceOf(address(target)), 50_000);
+    }
+
+    function test_Fee_ASellerSendingItsOwnStakePaysNoFee() public {
+        SellerStakeV2 target = _withFees(seller, 70_000);
+        assertEq(target.stakeOf(seller), 50_000);
+        assertEq(usdc.balanceOf(seller), 950_000); // the fee came straight back
+    }
+
+    function test_Fee_AStakeMustLeaveABond() public {
+        SellerStakeV2 target = new SellerStakeV2(IUSDC(address(usdc)), vs, COOLDOWN, FEE, FEE);
+        vm.expectRevert("stake below fee");
+        target.stakeWithAuthorization(seller, FEE, 0, block.timestamp + 1 hours, bytes32(++authNonce), 27, 0, 0);
+        target.stakeWithAuthorization(seller, FEE + 1, 0, block.timestamp + 1 hours, bytes32(++authNonce), 27, 0, 0);
+        assertEq(target.stakeOf(seller), 1);
+    }
+
+    function test_Fee_ASlashPaysTheBuyerThenTheSender() public {
+        SellerStakeV2 target = _withFees(makeAddr("relayer"), 120_000); // bond 100 000
+        bytes32 id = _propose(_claim(bytes32(uint256(1)), 40_000));
+        vm.warp(block.timestamp + WINDOW);
+        address keeper = makeAddr("keeper");
+        vm.prank(keeper);
+        assertEq(target.executeSlash(id), 40_000);
+        assertEq(usdc.balanceOf(buyer), 40_000);
+        assertEq(usdc.balanceOf(keeper), FEE);
+        assertEq(target.stakeOf(seller), 40_000);
+        assertEq(usdc.balanceOf(address(target)), target.totalStaked());
+    }
+
+    function test_Fee_TheBuyerComesFirstWhenTheBondIsShort() public {
+        SellerStakeV2 target = _withFees(makeAddr("relayer"), 50_000); // bond 30 000
+        bytes32 id = _propose(_claim(bytes32(uint256(1)), 25_000));
+        bytes32 empty = _propose(_claim(bytes32(uint256(2)), 25_000));
+        vm.warp(block.timestamp + WINDOW);
+        address keeper = makeAddr("keeper");
+        vm.startPrank(keeper);
+        assertEq(target.executeSlash(id), 25_000);
+        assertEq(usdc.balanceOf(keeper), 5_000); // all that was left
+        assertEq(target.executeSlash(empty), 0);
+        vm.stopPrank();
+        assertEq(usdc.balanceOf(keeper), 5_000);
+        assertEq(usdc.balanceOf(buyer), 25_000);
+        assertEq(target.totalStaked(), 0);
+    }
+
+    function test_Fee_AVetoChargesTheSellerButNeverTheBuyerRefund() public {
+        SellerStakeV2 target = _withFees(makeAddr("relayer"), 120_000); // bond 100 000
+        bytes32 id = _propose(_claim(bytes32(uint256(1)), 40_000));
+        uint256 deadline = block.timestamp + 10 minutes;
+        bytes[] memory sigs = _sigs(target, _pair(keys[0], keys[2]), _vetoHash(id, deadline));
+        address keeper = makeAddr("keeper");
+        vm.prank(keeper);
+        target.vetoSlash(id, deadline, sigs);
+        assertEq(usdc.balanceOf(keeper), FEE);
+        assertEq(usdc.balanceOf(buyer), 0);
+        assertEq(target.stakeOf(seller), 80_000);
+        assertEq(usdc.balanceOf(address(target)), target.totalStaked());
+    }
+
+    function test_Fee_AnEmptyBondStillClosesAClaim() public {
+        SellerStakeV2 target = _withFees(makeAddr("relayer"), 40_000); // bond 20 000
+        bytes32 a = _propose(_claim(bytes32(uint256(1)), 20_000));
+        bytes32 b = _propose(_claim(bytes32(uint256(2)), 1));
+        vm.warp(block.timestamp + WINDOW);
+        target.executeSlash(a);
+        uint256 deadline = block.timestamp + 10 minutes;
+        target.vetoSlash(b, deadline, _sigs(target, _pair(keys[0], keys[2]), _vetoHash(b, deadline)));
+        assertEq(target.pendingCount(seller), 0);
+    }
+
+    function test_Fee_ASenderUsdcRefusesCannotTrapARefund() public {
+        SellerStakeV2 target = _withFees(makeAddr("relayer"), 120_000);
+        bytes32 id = _propose(_claim(bytes32(uint256(1)), 40_000));
+        vm.warp(block.timestamp + WINDOW);
+        address bad = makeAddr("blocked sender");
+        usdc.setBlocked(bad);
+        vm.prank(bad);
+        vm.expectRevert("blocked");
+        target.executeSlash(id);
+        assertEq(target.executeSlash(id), 40_000); // anyone else can still close it
+    }
+
+    function testFuzz_Fee_NoFeeEverTakesMoreThanTheBondHolds(uint256 bond, uint256 amount, uint256 fee) public {
+        fee = bound(fee, 0, MAX);
+        bond = bound(bond, 1, 1_000_000 - fee);
+        amount = bound(amount, 1, MAX);
+        SellerStakeV2 target = new SellerStakeV2(IUSDC(address(usdc)), vs, COOLDOWN, fee, fee);
+        stake = target;
+        _register(target, seller, sellerKey, receiptKey);
+        address relayer = makeAddr("relayer");
+        vm.prank(relayer);
+        target.stakeWithAuthorization(seller, bond + fee, 0, block.timestamp + 1 hours, bytes32(++authNonce), 27, 0, 0);
+        bytes32 id = _propose(_claim(bytes32(uint256(1)), amount));
+        vm.warp(block.timestamp + WINDOW);
+        uint256 paid = target.executeSlash(id);
+        uint256 afterRefund = bond - (amount < bond ? amount : bond);
+        uint256 taken = fee < afterRefund ? fee : afterRefund;
+        assertEq(paid, amount < bond ? amount : bond);
+        assertEq(target.stakeOf(seller), afterRefund - taken);
+        assertEq(usdc.balanceOf(address(target)), target.totalStaked());
+    }
+
     // ---- unstaking ----
 
     function test_Withdraw_BlockedWhileAClaimIsOpen() public {
@@ -456,6 +657,27 @@ contract SellerStakeV2Test is StakeSigning {
         token.arm(address(target), abi.encodeCall(SellerStakeV2.withdraw, (seller)));
         vm.expectRevert(ReentrancyGuardTransient.ReentrancyGuardReentrantCall.selector);
         target.executeSlash(id);
+    }
+
+    function test_Reentrancy_AFeeCannotReenterTheStakeCallOrAVeto() public {
+        ReentrantUSDC token = new ReentrantUSDC();
+        SellerStakeV2 target = new SellerStakeV2(IUSDC(address(token)), vs, COOLDOWN, FEE, FEE);
+        token.mint(seller, 200_000);
+        target.stakeWithAuthorization(seller, 100_000, 0, block.timestamp + 1 hours, bytes32(uint256(1)), 27, 0, 0);
+        _register(target, seller, sellerKey, receiptKey);
+        SellerStakeV2.Claim memory c = _claim(bytes32(uint256(1)), 40_000);
+        bytes32 id = target.proposeSlash(c, _sigs(target, _pair(keys[0], keys[1]), _claimHash(c)));
+        vm.prank(seller);
+        target.requestUnstake();
+        vm.warp(block.timestamp + COOLDOWN);
+
+        uint256 deadline = block.timestamp + 10 minutes;
+        bytes[] memory sigs = _sigs(target, _pair(keys[0], keys[2]), _vetoHash(id, deadline));
+        token.arm(address(target), abi.encodeCall(SellerStakeV2.withdraw, (seller)));
+        vm.expectRevert(ReentrancyGuardTransient.ReentrancyGuardReentrantCall.selector);
+        target.vetoSlash(id, deadline, sigs);
+        vm.expectRevert(ReentrancyGuardTransient.ReentrancyGuardReentrantCall.selector);
+        target.stakeWithAuthorization(seller, 50_000, 0, block.timestamp + 1 hours, bytes32(uint256(2)), 27, 0, 0);
     }
 
     // ---- fuzz ----

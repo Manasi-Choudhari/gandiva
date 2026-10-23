@@ -16,6 +16,7 @@ contract SellerStakeV2ForkTest is StakeSigning {
     bytes32 internal constant RECEIVE_TYPEHASH =
         keccak256("ReceiveWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)");
     uint256 internal constant COOLDOWN = 2 hours;
+    uint256 internal constant FEE = 20_000;
 
     SellerStakeV2 internal stake;
     uint256[3] internal keys;
@@ -50,12 +51,18 @@ contract SellerStakeV2ForkTest is StakeSigning {
     function test_Fork_DeployScriptPointsAtRealUSDC() public view {
         assertEq(address(stake.usdc()), address(USDC));
         assertEq(stake.cooldown(), COOLDOWN);
+        assertEq(stake.stakeFee(), FEE);
+        assertEq(stake.slashFee(), FEE);
     }
 
     function test_Fork_StakeSlashAndWithdrawMoveRealUSDC() public {
-        _stake(50_000, keccak256("stake"));
-        assertEq(USDC.balanceOf(address(stake)), 50_000);
-        assertEq(USDC.balanceOf(seller), 950_000);
+        address relayer = makeAddr("relayer");
+        vm.startPrank(relayer);
+        _stake(90_000, keccak256("stake"));
+        vm.stopPrank();
+        assertEq(USDC.balanceOf(address(stake)), 70_000);
+        assertEq(USDC.balanceOf(relayer), FEE);
+        assertEq(USDC.balanceOf(seller), 910_000);
 
         _register(stake, seller, sellerKey, makeAddr("receipt-signer"));
         SellerStakeV2.Claim memory c = SellerStakeV2.Claim({
@@ -69,14 +76,16 @@ contract SellerStakeV2ForkTest is StakeSigning {
         });
         bytes32 id = stake.proposeSlash(c, _sigs(stake, _pair(keys[0], keys[1]), _claimHash(c)));
         vm.warp(block.timestamp + 30 minutes);
+        vm.prank(relayer);
         assertEq(stake.executeSlash(id), 40_000);
         assertEq(USDC.balanceOf(buyer), 40_000);
+        assertEq(USDC.balanceOf(relayer), 2 * FEE);
 
         vm.prank(seller);
         stake.requestUnstake();
         vm.warp(block.timestamp + COOLDOWN);
         stake.withdraw(seller);
-        assertEq(USDC.balanceOf(seller), 960_000);
+        assertEq(USDC.balanceOf(seller), 920_000);
         assertEq(USDC.balanceOf(address(stake)), 0);
         assertEq(stake.totalStaked(), 0);
     }
@@ -92,6 +101,6 @@ contract SellerStakeV2ForkTest is StakeSigning {
         (v, r, s) = _authorize(seller, sellerKey, 50_000, nonce);
         vm.expectRevert();
         stake.stakeWithAuthorization(seller, 50_000, 0, block.timestamp + 1 hours, nonce, v, r, s);
-        assertEq(stake.totalStaked(), 50_000);
+        assertEq(stake.totalStaked(), 50_000 - FEE);
     }
 }

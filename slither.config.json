@@ -1,0 +1,4 @@
+{
+  "filter_paths": "lib/|foundry/|contracts/SellerStake.sol",
+  "detectors_to_exclude": "timestamp"
+}

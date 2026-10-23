@@ -53,6 +53,45 @@ jobs:
       - run: npm --prefix client run build
       - run: npm --prefix client run typecheck
 
+  # SellerStakeV2: Foundry tests, a local copy of Base Sepolia, the committed build and the static analysers.
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Read only, and only to copy the chain: all changes stay in the runner.
+      FORK_RPC: https://sepolia.base.org
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1.9.2
+        with:
+          version: v1.5.1
+      - run: npm ci
+      - name: unit, fuzz, invariant and fork tests
+        run: forge test
+      - name: contracts/SellerStakeV2.json matches the source
+        run: |
+          npm run stake:compile
+          git diff --exit-code contracts/SellerStakeV2.json
+      - name: full rehearsal on a local chain
+        run: npm run stake:dry-run
+      - name: slither
+        run: |
+          pipx install slither-analyzer==0.11.6
+          slither .
+      # Report only: it is on the run's summary page and does not fail the build.
+      - name: aderyn
+        continue-on-error: true
+        run: |
+          npx --yes @cyfrin/aderyn@0.6.8 --output "$RUNNER_TEMP/aderyn.md"
+          cat "$RUNNER_TEMP/aderyn.md" >> "$GITHUB_STEP_SUMMARY"
+
   # The official release binary, checked against its sha256 (avoids the gitleaks-action licence key).
   secrets:
     runs-on: ubuntu-latest

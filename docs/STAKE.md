@@ -112,7 +112,7 @@ Sign after the payment settles, over the exact bytes you send. `src/stake/receip
 
 ## Testing the contract
 
-None of these spend anything. `forge` and `anvil` come from [Foundry](https://getfoundry.sh); clone with `--recurse-submodules`, or run `git submodule update --init`, to get `lib/`.
+None of these spend anything. `forge` and `anvil` come from [Foundry](https://getfoundry.sh); run `git submodule update --init` once to get `lib/`. Leave out `--recursive`: nothing here uses OpenZeppelin's own nested libraries, and their long paths can fail on Windows.
 
 | Command | What it checks |
 |---|---|

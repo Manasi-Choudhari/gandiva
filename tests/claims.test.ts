@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // SellerStakeV2 as the claim worker sees it: claim state per id, the relayed sends, the verifier set.
 const chain = vi.hoisted(() => ({
   claims: new Map<string, { status: number; executeAfter: number; amount: bigint }>(),
+  bond: 1_000_000n as bigint | Error,
   clock: 0,
   failPropose: 0,
   proposedBy: [] as string[],
@@ -24,6 +25,12 @@ vi.mock("../src/stake/index.js", async (importOriginal) => {
     stakeEnabled: () => true,
     verifierSet: async () => set,
     chainView: () => fakeChain(chain.view),
+    bondOnChain: async () => {
+      if (chain.bond instanceof Error) throw chain.bond;
+      return chain.bond;
+    },
+    stakeFees: async () => ({ stakeFee: 20_000n, slashFee: 20_000n }),
+    slashedOnChain: async (id: string) => chain.claims.get(id)?.amount ?? null,
     claimOnChain: async (id: string) => chain.claims.get(id) ?? { status: 0, executeAfter: 0 },
     proposeOnChain: async (m: any, sigs: Hex[]) => {
       if (chain.failPropose-- > 0) throw new Error("rpc down");
@@ -79,6 +86,7 @@ beforeEach(() => {
   vi.unstubAllGlobals();
   db.exec("DELETE FROM claims");
   chain.claims.clear();
+  chain.bond = 1_000_000n;
   chain.failPropose = 0;
   chain.view = {};
 });
@@ -177,7 +185,82 @@ describe("stake claim worker", () => {
     expect(row(ledgerId)).toMatchObject({ state: "proposed", claimId, proposeTx: null });
     chain.claims.get(claimId)!.status = 2;
     await run(T0 + 2000);
-    expect(row(ledgerId)).toMatchObject({ state: "executed", lastError: "state taken from the chain" });
+    expect(row(ledgerId)).toMatchObject({ state: "executed", lastError: "state taken from the chain", paid: "1000" });
+    expect(slashedTotal(SELLER)).toEqual({ count: 1, amount: 1000n }); // a keeper's execute counts like our own
+  });
+
+  it("closes a claim on an empty bond without a transaction", async () => {
+    const { ledgerId, nonce } = await opened({ n: 110 });
+    await sign(ledgerId, 1);
+    chain.bond = 0n;
+    await run(T0 + 1000);
+    expect(row(ledgerId).state).toBe("no_bond");
+    expect(chain.claims.get(claimIdOf(SELLER, BUYER, nonce))).toBeUndefined();
+  });
+
+  it("counts claims already on chain, each with its fee, against the bond", async () => {
+    chain.bond = 22_000n; // room for one 0.001 claim and its 0.02 fee, and 0.001 more
+    const a = await opened({ n: 111 });
+    await sign(a.ledgerId, 1);
+    await run(T0 + 1000);
+    expect(row(a.ledgerId).state).toBe("proposed");
+
+    const b = await opened({ n: 112 });
+    await sign(b.ledgerId, 1);
+    await run(T0 + 2000);
+    expect(row(b.ledgerId).state).toBe("proposed");
+
+    const c = await opened({ n: 113 });
+    await sign(c.ledgerId, 1);
+    await run(T0 + 3000);
+    expect(row(c.ledgerId).state).toBe("no_bond");
+  });
+
+  it("holds a 4th claim until a slot frees, without sending a call the contract would refuse", async () => {
+    const first = await opened({ n: 115 });
+    await sign(first.ledgerId, 1);
+    await run(T0 + 1000);
+    for (const n of [116, 117]) {
+      const o = await opened({ n });
+      await sign(o.ledgerId, 1);
+      await run(T0 + 1000);
+    }
+    const fourth = await opened({ n: 118 });
+    await sign(fourth.ledgerId, 1);
+    await run(T0 + 2000);
+    expect(row(fourth.ledgerId)).toMatchObject({ state: "open", lastError: "waiting: this seller's 3 claim slots are in use" });
+
+    await run(T0 + 31 * MIN); // the first three execute, and the 4th goes in the same pass
+    expect(row(first.ledgerId).state).toBe("executed");
+    expect(row(fourth.ledgerId).state).toBe("proposed");
+  });
+
+  it("a vetoed claim keeps its slot until its window ends", async () => {
+    const first = await opened({ n: 119, receipt: null });
+    await sign(first.ledgerId, 1);
+    await run(T0 + 1000);
+    for (const n of [120, 121]) {
+      const o = await opened({ n });
+      await sign(o.ledgerId, 1);
+      await run(T0 + 1000);
+    }
+    const claimId = claimIdOf(SELLER, BUYER, first.nonce);
+    chain.claims.get(claimId)!.status = 3;
+    await run(T0 + 2000);
+    expect(row(first.ledgerId).state).toBe("vetoed");
+
+    const fourth = await opened({ n: 122 });
+    await sign(fourth.ledgerId, 1);
+    await run(T0 + 3000);
+    expect(row(fourth.ledgerId).state).toBe("open");
+  });
+
+  it("retries, and does not close the claim, when the bond cannot be read", async () => {
+    const { ledgerId } = await opened({ n: 114 });
+    await sign(ledgerId, 1);
+    chain.bond = new Error("rpc down");
+    await run(T0 + 1000);
+    expect(row(ledgerId)).toMatchObject({ state: "open", attempts: 1, lastError: "rpc down" });
   });
 
   it("files one claim per ledger row", async () => {

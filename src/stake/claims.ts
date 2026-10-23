@@ -5,13 +5,13 @@ import { db } from "../db.js";
 import { log } from "../log.js";
 import { workerTick } from "../workers.js";
 import { getEvidence, holdEvidence, MAX_EVIDENCE_BODY } from "./evidence.js";
-import { chainView, claimOnChain, executeOnChain, proposeOnChain, relayerStatus, stakeEnabled, StakeError, verifierSet, vetoOnChain } from "./index.js";
+import { bondOnChain, chainView, claimOnChain, CLAIMS_PER_WINDOW, executeOnChain, proposeOnChain, relayerStatus, slashedOnChain, stakeEnabled, StakeError, stakeFees, verifierSet, vetoOnChain } from "./index.js";
 import { checkClaim, checkRebuttal, claimIdOf, claimSignerOf, signClaim, signVeto, vetoSignerOf, type ClaimMessage } from "./verify.js";
 
 /**
  * Stake claims for paid-and-rejected calls. A background worker walks each one through
  *   new -> open (checked, collecting verifier signatures) -> proposed (on chain, 30 min window) -> executed | vetoed
- * and closes the rest as expired, rejected or not_slashable. Chain calls retry with backoff; nothing is ever sent twice,
+ * and closes the rest as expired, rejected, not_slashable or no_bond. Chain calls retry with backoff; nothing is ever sent twice,
  * because every step first reads the claim's state on chain.
  */
 db.exec(`
@@ -109,10 +109,22 @@ export function fileClaim(c: { ledgerId: number; evidence: Hex; seller: string; 
   if (r.changes) holdEvidence(c.evidence, true);
 }
 
-/** Follows a claim the chain already has (a proposal or close whose answer we lost) instead of sending it again. */
-function adopt(row: Row, id: Hex, on: { status: number; executeAfter: number }, now: number) {
-  if (on.status === 1) save(row.id, { state: "proposed", claim_id: id, execute_after: on.executeAfter * 1000, attempts: 0, next_at: 0 });
-  else close(row, on.status === 2 ? "executed" : "vetoed", "state taken from the chain", now, { claim_id: id });
+/** Follows a claim the chain already has (a proposal or close whose answer we lost, or a keeper's execute) instead of sending it again. */
+async function adopt(row: Row, id: Hex, on: { status: number; executeAfter: number }, now: number) {
+  if (on.status === 1) return save(row.id, { state: "proposed", claim_id: id, execute_after: on.executeAfter * 1000, attempts: 0, next_at: 0 });
+  const paid = on.status === 2 ? await slashedOnChain(id, on.executeAfter) : null;
+  close(row, on.status === 2 ? "executed" : "vetoed", "state taken from the chain", now, { claim_id: id, paid: paid?.toString() ?? null });
+}
+
+const onChainFor = (seller: Hex) => db.prepare("SELECT amount FROM claims WHERE state = 'proposed' AND lower(seller) = ?").all(seller.toLowerCase()) as { amount: string | null }[];
+
+/** Claims still holding one of the seller's slots: a vetoed one keeps its slot until its window ends. */
+const slotsHeld = (seller: Hex, now: number) => (db.prepare("SELECT COUNT(*) AS n FROM claims WHERE lower(seller) = ? AND execute_after > ?").get(seller.toLowerCase(), now) as { n: number }).n;
+
+/** True while the seller's bond still has something left after its claims already on chain, each with its fee. */
+async function bondCovers(seller: Hex, open: { amount: string | null }[]) {
+  const [staked, { slashFee }] = await Promise.all([bondOnChain(seller), stakeFees()]);
+  return staked > open.reduce((a, c) => a + BigInt(c.amount ?? "0") + slashFee, 0n);
 }
 
 async function step(row: Row, now: number) {
@@ -136,7 +148,7 @@ async function step(row: Row, now: number) {
     if (on.status !== 0) return adopt(row, id, on, now);
     // addRebuttal already checked it: a rebutted claim never goes on chain.
     if (row.rebuttal) return close(row, "vetoed", "the seller's rebuttal was accepted before the claim went on chain", now);
-    if (BigInt(nowS) > m.deadline) return close(row, "expired", "fewer than 2 verifier signatures before the claim deadline", now);
+    if (BigInt(nowS) > m.deadline) return close(row, "expired", "not on chain before the claim deadline", now);
     const sigs = JSON.parse(row.sigs) as Record<string, Hex>;
     const me = own();
     if (me && !sigs[me]) {
@@ -145,6 +157,10 @@ async function step(row: Row, now: number) {
     }
     const ready = usable(sigs, await verifierSet());
     if (ready.length < 2) return; // waiting for an outside verifier
+    // The contract limits claims per seller per window, so waiting beats sending a call it will refuse.
+    if (slotsHeld(m.seller, now) >= CLAIMS_PER_WINDOW) return save(row.id, { last_error: `waiting: this seller's ${CLAIMS_PER_WINDOW} claim slots are in use` });
+    // A claim on nothing refunds nobody and no fee repays its gas.
+    if (!(await bondCovers(m.seller, onChainFor(m.seller)))) return close(row, "no_bond", "the seller's bond is already spoken for", now);
     const p = await proposeOnChain(m, ready);
     return save(row.id, { state: "proposed", claim_id: p.id, execute_after: p.executeAfter * 1000, propose_tx: p.txHash, attempts: 0, next_at: 0, last_error: null });
   }

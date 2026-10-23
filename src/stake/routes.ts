@@ -64,7 +64,7 @@ stakeRoutes.get("/", async (c) => {
 
 stakeRoutes.get("/events", (c) => c.json({ events: listStakeEvents({ seller: c.req.query("seller") }) }));
 
-/** Claims for verifiers and the UI. ?state=active | new | open | proposed | executed | vetoed | expired | rejected | not_slashable; ?seller= */
+/** Claims for verifiers and the UI. ?state=active | new | open | proposed | executed | vetoed | expired | rejected | not_slashable | no_bond; ?seller= */
 stakeRoutes.get("/claims", (c) => c.json({ claims: listClaims({ state: c.req.query("state"), seller: c.req.query("seller") }) }));
 
 /** The evidence bundle exactly as stored, so its keccak256 is the hash in the URL. */

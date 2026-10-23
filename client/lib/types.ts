@@ -105,13 +105,15 @@ export interface CompareResponse {
 export interface StakeOverview {
   enabled: boolean;
   contract?: string;
-  /** Pays the gas for every relayed call; it has no powers over the bonds. */
-  relayer?: { address: string; eth: string; low: boolean };
+  /** Pays the gas for every relayed call and earns the fees; it has no powers over the bonds. */
+  relayer?: { address: string; eth: string; low: boolean; txs: number; gasEth: string; feesUsdc: string };
   verifiers?: string[];
   claims?: { open: number; oldestOpenMinutes: number | null };
   cooldownSeconds?: number;
   totalStakedUsdc?: string;
   minStake?: string;
+  stakeFee?: string;
+  slashFee?: string;
   explorer?: string;
   sellers: (StakePosition & { payTo: string; slashedCount: number; slashed: string })[];
 }
@@ -123,7 +125,7 @@ export interface StakeClaim {
   evidence: string;
   seller: string;
   buyer: string;
-  state: "new" | "open" | "proposed" | "executed" | "vetoed" | "expired" | "rejected" | "not_slashable";
+  state: "new" | "open" | "proposed" | "executed" | "vetoed" | "expired" | "rejected" | "not_slashable" | "no_bond";
   kind: 1 | 2 | null;
   amount: string | null;
   claimId: string | null;

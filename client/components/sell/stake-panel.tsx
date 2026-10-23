@@ -58,24 +58,30 @@ function claimStatus(c: StakeClaim, nowMs: number): { text: string; tone: "bad" 
     case "vetoed":
       return { text: "vetoed: no refund", tone: "muted" };
     case "expired":
-      return { text: "expired before 2 verifiers agreed", tone: "muted" };
+      return { text: "expired before it reached the chain", tone: "muted" };
     case "rejected":
       return { text: "rejected by the verifiers' check", tone: "muted" };
     case "not_slashable":
       return { text: "not slashable (no receipt signer at the time)", tone: "muted" };
+    case "no_bond":
+      return { text: "closed: no bond left to refund from", tone: "muted" };
   }
 }
 
+/** A typed USDC amount in units, or null while it is not a number. */
+const toUnits = (amount: string) => (/^\d+(\.\d{1,6})?$/.test(amount.trim()) ? Math.round(Number(amount) * 1_000_000) : null);
+
 /**
  * The seller's bond in SellerStakeV2. Staking, unstaking and the receipt signer are signatures only (no gas); the registry
- * relays them. A bond is slashable only with a receipt signer: then 2 of 3 verifiers can refund a buyer who paid for junk.
+ * relays them and earns a fee for it. A bond is slashable only with a receipt signer: then 2 of 3 verifiers can refund a
+ * buyer who paid for junk.
  */
 export function StakePanel({ wallet }: { wallet: string }) {
   const { data: overview } = useStake();
   const { data: pos, mutate } = useSWR<StakePosition & { slashedCount: number; slashed: string }>(`/registry/stake/${wallet}`, fetcher, { refreshInterval: 10000 });
   const { data: events, mutate: mutateEvents } = useSWR<{ events: StakeEvent[] }>(`/registry/stake/events?seller=${wallet}`, fetcher, { refreshInterval: 10000 });
   const { data: claims, mutate: mutateClaims } = useSWR<{ claims: StakeClaim[] }>(`/registry/stake/claims?seller=${wallet}`, fetcher, { refreshInterval: 10000 });
-  const [amount, setAmount] = useState("0.05");
+  const [amount, setAmount] = useState("0.07"); // 0.05 bond (full stake points) + the 0.02 fee
   const [signer, setSigner] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const nowMs = useNow(5000);
@@ -90,6 +96,11 @@ export function StakePanel({ wallet }: { wallet: string }) {
   const unlocked = unlocking && now >= (pos?.unlockAt ?? 0);
   const refresh = () => Promise.all([mutate(), mutateEvents(), mutateClaims()]);
   const validSigner = /^0x[0-9a-fA-F]{40}$/.test(signer.trim());
+  const stakeFee = Number(overview.stakeFee ?? 0);
+  const slashFee = Number(overview.slashFee ?? 0);
+  const minStake = Number(overview.minStake ?? 0);
+  const units = toUnits(amount);
+  const enough = units !== null && units >= minStake;
 
   async function run(label: string, fn: () => Promise<{ txHash: string }>) {
     setBusy(label);
@@ -140,8 +151,9 @@ export function StakePanel({ wallet }: { wallet: string }) {
       <p className="text-sm text-muted-foreground">
         Lock USDC behind your listings. Buyers rank staked sellers as more credible. If you are paid and return output that breaks your own schema, 2 of 3
         independent verifiers can refund that buyer from your bond: at most 0.10 USDC per call, after a 30 min wait in which they can still veto it. Staking
-        is a signature in your wallet: no gas, the registry relays it. Unstaking has a {Math.round((overview.cooldownSeconds ?? 0) / 60)} min cooldown so a bond
-        can&apos;t be pulled ahead of a refund.
+        is a signature in your wallet: no gas, the registry relays it for a {usdc(overview.stakeFee)} USDC fee taken from each stake, which also covers your
+        unstake and withdraw. Each claim that reaches the chain takes {usdc(overview.slashFee)} USDC more from your bond, even if it is vetoed, after any
+        refund to the buyer. Unstaking has a {Math.round((overview.cooldownSeconds ?? 0) / 60)} min cooldown so a bond can&apos;t be pulled ahead of a refund.
       </p>
 
       <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -193,6 +205,9 @@ export function StakePanel({ wallet }: { wallet: string }) {
             <div className={"mt-2 text-xs " + (overview.relayer.low ? "text-warn" : "text-muted-foreground")}>
               relayer <AddrLink address={overview.relayer.address} />: {Number(overview.relayer.eth).toFixed(4)} ETH
               {overview.relayer.low ? " (low: stakes and refunds stall when it runs out)" : ""}
+              <div>
+                {overview.relayer.txs} transactions: {Number(overview.relayer.gasEth).toFixed(6)} ETH of gas, {overview.relayer.feesUsdc} USDC of fees
+              </div>
             </div>
           ) : null}
         </div>
@@ -203,7 +218,7 @@ export function StakePanel({ wallet }: { wallet: string }) {
           <Label htmlFor="stake-amount">Amount (USDC)</Label>
           <Input id="stake-amount" value={amount} onChange={(e) => setAmount(e.target.value)} className="w-32 font-mono" inputMode="decimal" />
         </div>
-        <Button onClick={stake} disabled={Boolean(busy)}>
+        <Button onClick={stake} disabled={Boolean(busy) || !enough}>
           <LandmarkIcon /> {busy === "Stake" ? "Sign in your wallet…" : "Stake"}
         </Button>
         <Button variant="outline" onClick={unstake} disabled={Boolean(busy) || !pos || pos.staked === "0" || unlocking}>
@@ -213,7 +228,13 @@ export function StakePanel({ wallet }: { wallet: string }) {
           <LockOpenIcon /> Withdraw
         </Button>
       </div>
-      <p className="text-xs text-muted-foreground">Your wallet needs the USDC itself (Base Sepolia, faucet.circle.com). It does not need ETH.</p>
+      <p className="text-xs text-muted-foreground">
+        {enough
+          ? `${usdc(String(units! - stakeFee))} USDC goes to your bond and ${usdc(String(stakeFee))} USDC is the fee. `
+          : `The smallest stake is ${usdc(String(minStake))} USDC, fee included. `}
+        A later claim takes up to {usdc(String(slashFee))} USDC from the bond on top of any refund. Your wallet needs the USDC itself (Base Sepolia,
+        faucet.circle.com). It does not need ETH.
+      </p>
 
       <div className="flex flex-col gap-2 rounded-xl border border-border px-4 py-3">
         <div className="text-sm font-medium">Receipt signer</div>

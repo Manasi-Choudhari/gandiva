@@ -60,7 +60,7 @@ services:
         sync: false
       - key: PAYTO_TRAVEL_BRIEF
         sync: false
-      # Optional: SellerStakeV2 (deploy the contract first with `npm run stake:deploy`)
+      # Optional: SellerStakeV2 (deploy the contract first, see docs/STAKE.md)
       - key: STAKE_CONTRACT
         sync: false
       - key: RELAYER_PRIVATE_KEY

@@ -15,7 +15,6 @@
     "wallets:new": "tsx scripts/wallets.ts",
     "balances": "tsx scripts/balances.ts",
     "stake:compile": "tsx scripts/stake/compile.ts",
-    "stake:deploy": "tsx scripts/stake/deploy.ts",
     "stake:seed": "tsx scripts/stake/seed.ts",
     "stake:rotate": "tsx scripts/stake/rotate.ts",
     "stake:veto": "tsx scripts/stake/veto.ts",

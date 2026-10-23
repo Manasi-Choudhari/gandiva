@@ -23,7 +23,7 @@ const plan: [string, bigint][] = [
 const pub = createPublicClient({ chain: baseSepolia, transport: http(config.rpcUrl) });
 const info = await api<any>("/registry/stake");
 if (!info.enabled) {
-  console.log("Staking is not enabled on the server (deploy with npm run stake:deploy, then restart the server).");
+  console.log("Staking is not enabled on the server (deploy the contract, see docs/STAKE.md, then restart the server).");
   process.exit(1);
 }
 if (!config.stake.receiptSignerKey) {

@@ -30,7 +30,7 @@ const briefAddr = privateKeyToAccount(get("TRAVEL_BRIEF_KEY") as `0x${string}`).
 set("PAYTO_TRAVEL_BRIEF", briefAddr);
 rows.push(["travel-brief", briefAddr]);
 
-// The stake relayer deploys SellerStakeV2 and pays the gas for stakes, claims and refunds; it has no other powers. It takes
+// The stake relayer pays the gas for stakes, claims and refunds; it has no other powers. It takes
 // over the old arbiter key, so the ETH already on that address keeps working.
 if (!get("RELAYER_PRIVATE_KEY")) set("RELAYER_PRIVATE_KEY", get("ARBITER_PRIVATE_KEY") || generatePrivateKey());
 const relayerAddr = privateKeyToAccount(get("RELAYER_PRIVATE_KEY") as `0x${string}`).address;

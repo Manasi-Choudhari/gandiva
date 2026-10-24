@@ -20,6 +20,7 @@
     "stake:rotate": "tsx scripts/stake/rotate.ts",
     "stake:veto": "tsx scripts/stake/veto.ts",
     "verifier": "tsx scripts/verifier.ts",
+    "keeper": "tsx scripts/keeper.ts",
     "task": "tsx scripts/run-task.ts",
     "reconcile": "tsx scripts/reconcile.ts",
     "judge:replay": "tsx scripts/judge/replay.ts",

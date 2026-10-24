@@ -1,0 +1,37 @@
+# Backup for the API's claim worker: executes refunds that are past their window, from the chain alone, so they still go out
+# when the API is down. It fails, and GitHub emails, if a refund cannot be paid or its wallet runs low on ETH.
+# Settings -> Secrets and variables -> Actions: secret KEEPER_KEY; variable STAKE_CONTRACT.
+# The job is skipped while STAKE_CONTRACT is empty.
+name: stake keeper
+
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: keeper
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  keep:
+    if: vars.STAKE_CONTRACT != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24
+          cache: npm
+      # No install scripts: this job holds a key, and it needs none of the packages that compile on install.
+      - run: npm ci --ignore-scripts
+      - run: npm run keeper
+        env:
+          KEEPER_KEY: ${{ secrets.KEEPER_KEY }}
+          STAKE_CONTRACT: ${{ vars.STAKE_CONTRACT }}

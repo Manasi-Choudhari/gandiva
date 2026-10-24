@@ -1,4 +1,4 @@
-# One of the three SellerStakeV2 verifiers (the others: the API on Render, and `npm run verifier` on a maintainer's machine).
+# One of the three SellerStakeV2 verifiers (the others: the API on Render, and a sealed backup key for emergencies).
 # Every 5 minutes it re-checks the open stake claims on its own and signs the ones the evidence supports.
 # Settings -> Secrets and variables -> Actions: secret VERIFIER_KEY; variables GANDIVA_URL and STAKE_CONTRACT.
 # The job is skipped while STAKE_CONTRACT is empty.
@@ -29,7 +29,8 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - run: npm ci
+      # No install scripts: this job holds a key, and it needs none of the packages that compile on install.
+      - run: npm ci --ignore-scripts
       - run: npm run verifier -- --once
         env:
           VERIFIER_KEY: ${{ secrets.VERIFIER_KEY }}

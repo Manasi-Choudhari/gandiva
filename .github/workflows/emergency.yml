@@ -1,0 +1,56 @@
+# Run by hand only, from the Actions tab. A GitHub secret cannot be read back, so this is how the verifier key held here signs
+# an emergency veto or rotation, and how a signed one gets sent with the keeper's wallet when the API is down. Signatures are
+# safe to appear in the log. docs/STAKE.md, Runbook, says when to use it.
+# Secrets VERIFIER_KEY and KEEPER_KEY; variable STAKE_CONTRACT. Only people with write access can run it.
+name: stake emergency
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do
+        type: choice
+        required: true
+        options:
+          - veto-sign
+          - veto-send
+          - rotate-sign
+          - rotate-send
+      args:
+        description: "Arguments after sign or send, as in the runbook, separated by spaces"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ACTION: ${{ inputs.action }}
+      ARGS: ${{ inputs.args }}
+      STAKE_CONTRACT: ${{ vars.STAKE_CONTRACT }}
+      DB_PATH: ${{ runner.temp }}/gandiva.db
+    steps:
+      - name: Refuse anything but addresses, hashes, signatures and numbers
+        run: '[[ "$ARGS" =~ ^[0-9a-fA-Fx\ ]+$ ]]'
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Sign
+        if: endsWith(inputs.action, '-sign')
+        run: npm run "stake:${ACTION%-*}" -- sign $ARGS
+        env:
+          VERIFIER_KEY: ${{ secrets.VERIFIER_KEY }}
+      - name: Send
+        if: endsWith(inputs.action, '-send')
+        run: npm run "stake:${ACTION%-*}" -- send $ARGS
+        env:
+          RELAYER_PRIVATE_KEY: ${{ secrets.KEEPER_KEY }}

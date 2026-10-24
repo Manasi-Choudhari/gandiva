@@ -20,6 +20,8 @@ Include what the problem is, how to reproduce it, and what an attacker gains. Ga
 | Asset | Where it lives | If it leaks |
 |---|---|---|
 | Hot wallet keys (`BUYER_PRIVATE_KEY`, `RELAYER_PRIVATE_KEY`, `SERVER_VERIFIER_KEY`, `RECEIPT_SIGNER_KEY`) | Server environment | That wallet's funds, or one of the signatures it provides |
+| `VERIFIER_KEY`, `KEEPER_KEY` | GitHub Actions secrets | A second verifier signature, or the keeper's small balance |
+| Third verifier key | Sealed in an encrypted keystore, used only in emergencies | With any other verifier key, enough to slash within the contract's limits |
 | `SECRETS_KEY` | Server environment | Decrypts every stored secret, once combined with a copy of the database |
 | Agent wallet keys and sellers' API keys | SQLite, AES-256-GCM encrypted | Useless without `SECRETS_KEY` |
 | Sessions | SQLite, only a SHA-256 hash of the token, 7-day expiry | A stolen cookie acts as that user until it expires or they log out |
@@ -38,7 +40,7 @@ browser -> Vercel UI proxy -> Render API -> sellers (third-party, untrusted)
 - **API to sellers:** a seller's 402 must match its registry listing (price, token, network, payTo) before anything is signed. Seller endpoints are checked against private-network addresses, and every seller response is treated as hostile input.
 - **LLM to payments:** the LLM can't direct a payment. Output that gives orders to an AI is rejected before the planner reads it.
 
-`README.md` ("Payment Safety") lists the protections on the buyer's side.
+`README.md` ("Payment Safety") lists the protections on the buyer's side. [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md) records the review of the money paths and what it found, and `docs/STAKE.md` has the runbook for stolen keys.
 
 ## Known limits
 

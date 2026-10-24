@@ -392,6 +392,83 @@ describe("MCP server template: listing", () => {
   });
 });
 
+describe("MCP server template: free test calls", () => {
+  const test_ = (cookie: string | undefined, body: unknown) => send("POST", "/mine/mcp-servers/test", cookie, body);
+  const trial = (over: Record<string, unknown> = {}) => ({ url: URL1, token: TOKEN, tool: "echo", input: { text: "hi" }, ...over });
+
+  it("needs a sign-in", async () => {
+    expect((await test_(undefined, trial())).status).toBe(401);
+    expect(remoteRequests).toHaveLength(0);
+  });
+
+  it("runs the tool on the seller's server without listing, paying or recording anything", async () => {
+    const res = await test_(aliceCookie, trial());
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as any;
+    expect(body.text).toBe("echo: hi");
+    expect(body.ms).toEqual(expect.any(Number));
+    expect(remoteRequests.filter((r) => r.rpc === "tools/call")).toHaveLength(1);
+    expect(remoteRequests.filter((r) => r.method === "POST").every((r) => r.authorization === `Bearer ${TOKEN}`)).toBe(true);
+    expect(fake.settleCalls).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM sales").get()).toEqual({ n: 0 });
+    expect(getService("sellerco-echo")).toBeUndefined();
+  });
+
+  it("gives a sample input for each tool to start from", async () => {
+    const body = (await (await loadTools(aliceCookie, { url: URL1 })).json()) as any;
+    expect(body.tools[0].sample).toEqual({ text: "sample text" });
+  });
+
+  it("uses a saved token only for its exact URL", async () => {
+    await save(aliceCookie, form());
+    remoteRequests = [];
+    expect((await test_(aliceCookie, trial({ token: undefined }))).status).toBe(200);
+    expect(remoteRequests.filter((r) => r.method === "POST").every((r) => r.authorization === `Bearer ${TOKEN}`)).toBe(true);
+    remoteRequests = [];
+    expect((await test_(aliceCookie, trial({ token: undefined, url: URL2 }))).status).toBe(200);
+    expect(remoteRequests.every((r) => r.authorization === null)).toBe(true);
+    remoteRequests = [];
+    expect((await test_(bobCookie, trial({ token: undefined }))).status).toBe(200);
+    expect(remoteRequests.every((r) => r.authorization === null)).toBe(true);
+  });
+
+  it("checks the input the way a paid call does, before the tool runs", async () => {
+    const res = await test_(aliceCookie, trial({ input: { nope: 1 } }));
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as any).error).toMatch(/invalid input/);
+    expect(remoteRequests.filter((r) => r.rpc === "tools/call")).toHaveLength(0);
+  });
+
+  it("refuses a tool the server does not have, and private addresses", async () => {
+    expect((await test_(aliceCookie, trial({ tool: "nope" }))).status).toBe(400);
+    expect(remoteRequests.filter((r) => r.rpc === "tools/call")).toHaveLength(0);
+    remoteRequests = [];
+    expect((await test_(aliceCookie, trial({ url: "https://intranet.example/mcp" }))).status).toBe(400);
+    expect(remoteRequests).toHaveLength(0);
+  });
+
+  it("reports a tool failure without leaking the token", async () => {
+    remoteCall = () => ({ isError: true, content: [{ type: "text", text: `bad token ${TOKEN}` }] });
+    const res = await test_(aliceCookie, trial());
+    expect(res.status).toBe(502);
+    const text = await res.text();
+    expect(text).toContain("the tool reported an error");
+    expect(text).not.toContain(TOKEN);
+  });
+
+  it("allows 20 test calls per hour per wallet, counted apart from server checks", async () => {
+    for (let i = 0; i < 20; i++) expect((await test_(aliceCookie, trial())).status).toBe(200);
+    expect((await test_(aliceCookie, trial())).status).toBe(429);
+    expect((await test_(bobCookie, trial())).status).toBe(200);
+    expect((await loadTools(aliceCookie, { url: URL1 })).status).toBe(200);
+  });
+
+  it("refuses an oversized request", async () => {
+    expect((await test_(aliceCookie, trial({ input: { text: "x".repeat(40_000) } }))).status).toBe(413);
+    expect(remoteRequests).toHaveLength(0);
+  });
+});
+
 describe("MCP server template: the paid route", () => {
   beforeEach(async () => {
     await save(aliceCookie, form());

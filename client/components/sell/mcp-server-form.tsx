@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { loadMcpTools, saveMcpServer } from "@/lib/api";
+import { loadMcpTools, saveMcpServer, testMcpTool } from "@/lib/api";
 import { toUnits, usdc } from "@/lib/format";
 import type { Category, McpInfo, McpSaved, McpTool, McpToolsLoaded } from "@/lib/types";
 import { priceProblem } from "./listing-preview";
@@ -33,6 +33,63 @@ function firstPicks(tools: McpTool[], defaultPrice: string): Record<string, Pick
       if (on) ticked++;
       return [t.name, { on, price: t.listedPrice ? usdc(t.listedPrice) : defaultPrice }];
     }),
+  );
+}
+
+/** A free run of one tool on the seller's own server, with the URL and token in the form. */
+function ToolTest({ url, token, tool }: { url: string; token: string; tool: McpTool }) {
+  const [open, setOpen] = useState(false);
+  const [input, setInput] = useState(() => JSON.stringify(tool.sample, null, 2));
+  const [testing, setTesting] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+  async function run() {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(input);
+    } catch {
+      return setResult({ ok: false, text: "Input must be valid JSON." });
+    }
+    setTesting(true);
+    setResult(null);
+    try {
+      const out = await testMcpTool({ url, ...(token ? { token } : {}), tool: tool.name, input: parsed as Record<string, unknown> });
+      setResult({ ok: true, text: `${out.text}\n\n(${(out.ms / 1000).toFixed(1)} s, nothing was paid)` });
+    } catch (e) {
+      setResult({ ok: false, text: e instanceof Error ? e.message : "Test failed." });
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <div>
+        <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => setOpen(true)}>
+          Test for free
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-2 rounded-md bg-muted/40 p-2">
+      <Label htmlFor={`m-test-${tool.name}`} className="text-xs text-muted-foreground">
+        Input (JSON). The sample is a guess, so edit it first.
+      </Label>
+      <textarea id={`m-test-${tool.name}`} rows={Math.min(8, input.split("\n").length + 1)} className={FIELD + " font-mono text-xs"} value={input} onChange={(e) => setInput(e.target.value)} spellCheck={false} />
+      {tool.access !== "read" ? <p className="text-xs text-warn">This really runs on your server, so anything this tool changes will change.</p> : null}
+      <div className="flex gap-2">
+        <Button type="button" size="sm" variant="outline" onClick={run} disabled={testing}>
+          {testing ? "Calling…" : "Run test"}
+        </Button>
+        <Button type="button" size="sm" variant="ghost" onClick={() => setOpen(false)} disabled={testing}>
+          Close
+        </Button>
+      </div>
+      <div aria-live="polite">
+        {result ? <pre className={"max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md px-3 py-2 text-xs " + (result.ok ? "bg-muted" : "border border-bad/40 bg-bad/10 text-bad")}>{result.text}</pre> : null}
+      </div>
+    </div>
   );
 }
 
@@ -247,6 +304,7 @@ export function McpServerForm({
                     </div>
                     <p className="text-xs text-muted-foreground">{t.description || (t.usable ? "" : "its input description is too large or not supported")}</p>
                     {t.access === "write" && pick.on ? <p className="text-xs text-warn">Anyone who pays can run this with your token.</p> : null}
+                    {t.usable ? <ToolTest url={url.trim()} token={token.trim()} tool={t} /> : null}
                   </li>
                 );
               })}

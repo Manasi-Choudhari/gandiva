@@ -6,13 +6,15 @@ import { config } from "../config.js";
 import { RegistryError, getService } from "../registry/store.js";
 import { verifyService } from "../registry/probe.js";
 import { McpSellerError } from "./client.js";
-import { loadTools, saveServer } from "./servers.js";
+import { loadTools, saveServer, testTool } from "./servers.js";
 
 /** Sell-tab "MCP server" template, mounted at /registry/mine/mcp-servers. */
 export const mcpSellerRoutes = new Hono();
 
 const MAX_BODY = 8 * 1024;
+const MAX_TEST_BODY = 32 * 1024;
 const tooLarge = (c: any) => c.json({ error: `request too large (max ${MAX_BODY} bytes)` }, 413);
+const testTooLarge = (c: any) => c.json({ error: `request too large (max ${MAX_TEST_BODY} bytes)` }, 413);
 
 function failure(c: any, err: unknown) {
   if (err instanceof ZodError) return c.json({ error: err.issues.map((i) => `${i.path.join(".") || "form"}: ${i.message}`).join("; "), issues: err.issues }, 400);
@@ -39,6 +41,16 @@ mcpSellerRoutes.post("/tools", bodyLimit({ maxSize: MAX_BODY, onError: tooLarge 
   if (!me) return c.json({ error: "sign in with your wallet first" }, 401);
   try {
     return c.json(await loadTools(await c.req.json(), me));
+  } catch (err) {
+    return failure(c, err);
+  }
+});
+
+mcpSellerRoutes.post("/test", bodyLimit({ maxSize: MAX_TEST_BODY, onError: testTooLarge }), async (c) => {
+  const me = currentUser(c);
+  if (!me) return c.json({ error: "sign in with your wallet first" }, 401);
+  try {
+    return c.json(await testTool(await c.req.json(), me));
   } catch (err) {
     return failure(c, err);
   }

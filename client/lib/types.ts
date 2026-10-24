@@ -468,6 +468,8 @@ export interface McpTool {
   access: "read" | "write" | "unknown";
   /** The current price in USDC smallest units when the tool is already on sale. */
   listedPrice: string | null;
+  /** Placeholder input for the free test call. */
+  sample: unknown;
 }
 
 export interface McpToolsLoaded {

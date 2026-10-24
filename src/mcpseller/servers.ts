@@ -1,5 +1,6 @@
 import type { Context } from "hono";
 import { z } from "zod";
+import { sampleFromSchema } from "../buyer/catalogue.js";
 import { config, MAX_PRICE_UNITS } from "../config.js";
 import { encryptSecret, secretsConfigured } from "../crypto/secrets.js";
 import { db } from "../db.js";
@@ -64,6 +65,7 @@ const form = {
 };
 const toolName = z.string().min(1).max(200);
 const loadForm = z.object({ ...form, serverId: z.string().max(40).optional() });
+const testForm = z.object({ ...form, tool: toolName, input: z.record(z.string(), z.unknown()).default({}) });
 const saveForm = z.object({
   ...form,
   name: z.string().trim().min(1).max(40).optional(),
@@ -128,14 +130,19 @@ export interface SavedServer {
 const TRIAL_LIMIT = 20;
 const TRIAL_WINDOW_MS = 3_600_000;
 const trialLog = new Map<string, number[]>();
-/** For tests: forget every wallet's recent server checks. */
-export const resetServerChecks = () => trialLog.clear();
-/** Reaching a remote server is rate-limited per wallet: "Load tools" and every save count. */
-function countTrial(wallet: string, now: number) {
-  const recent = (trialLog.get(wallet) ?? []).filter((t) => now - t < TRIAL_WINDOW_MS);
-  if (recent.length >= TRIAL_LIMIT) throw new McpSellerError(`at most ${TRIAL_LIMIT} server checks per hour`, 429);
-  trialLog.set(wallet, [...recent, now]);
+const testLog = new Map<string, number[]>();
+/** For tests: forget every wallet's recent server checks and test calls. */
+export const resetServerChecks = () => {
+  trialLog.clear();
+  testLog.clear();
+};
+function countIn(log: Map<string, number[]>, what: string, wallet: string, now: number) {
+  const recent = (log.get(wallet) ?? []).filter((t) => now - t < TRIAL_WINDOW_MS);
+  if (recent.length >= TRIAL_LIMIT) throw new McpSellerError(`at most ${TRIAL_LIMIT} ${what} per hour`, 429);
+  log.set(wallet, [...recent, now]);
 }
+/** Reaching a remote server is rate-limited per wallet: "Load tools" and every save count. */
+const countTrial = (wallet: string, now: number) => countIn(trialLog, "server checks", wallet, now);
 
 const needSecrets = (token: string | undefined) => {
   if (token && !secretsConfigured()) throw new McpSellerError("this server has no SECRETS_KEY, so it cannot store tokens yet", 503);
@@ -148,6 +155,8 @@ export interface LoadedTool {
   access: ToolAccess;
   /** The current price in USDC smallest units when this tool is already on sale. */
   listedPrice: string | null;
+  /** Placeholder input for the free test call, built from the tool's input schema. */
+  sample: unknown;
 }
 
 /** Free, owner-only look at a server's tools (nothing is listed or paid). `serverId` is the group being refreshed, if any. */
@@ -164,14 +173,43 @@ export async function loadTools(raw: unknown, wallet: string, now = Date.now()):
     url,
     name: defaultServerName(url),
     hasToken: Boolean(f.token ?? savedEnc),
-    tools: tools.map((t) => ({
-      name: t.name,
-      description: (t.description ?? t.title ?? "").slice(0, 200),
-      usable: cleanSchema(t.inputSchema) !== null,
-      access: toolAccess(t),
-      listedPrice: listedPrice.get(t.name) ?? null,
-    })),
+    tools: tools.map((t) => {
+      const schema = cleanSchema(t.inputSchema);
+      return {
+        name: t.name,
+        description: (t.description ?? t.title ?? "").slice(0, 200),
+        usable: schema !== null,
+        access: toolAccess(t),
+        listedPrice: listedPrice.get(t.name) ?? null,
+        sample: schema ? sampleFromSchema(schema) : {},
+      };
+    }),
   };
+}
+
+/**
+ * Free, owner-only run of one tool with the URL and token in the form (nothing is listed or paid, no sale is recorded).
+ * It really runs on the seller's server, so a tool that changes data changes it. Input gets the same check as a paid call.
+ */
+export async function testTool(raw: unknown, wallet: string, now = Date.now()): Promise<ToolAnswer & { ms: number }> {
+  const f = testForm.parse(raw);
+  needSecrets(f.token);
+  countIn(testLog, "test calls", wallet, now);
+  const url = await checkMcpUrl(f.url);
+  const token = f.token ?? readToken(savedTokenFor(wallet, url));
+  const tool = (await listRemoteTools(url, token)).find((t) => t.name === f.tool);
+  if (!tool) throw new McpSellerError(`that server has no tool called "${f.tool}"`);
+  const schema = cleanSchema(tool.inputSchema);
+  if (!schema) throw new McpSellerError("this tool cannot be sold: its input description is too large or not supported");
+  const input = validateInput(schema, f.input);
+  if (!input.ok) throw new McpSellerError(`invalid input: ${input.error}`);
+  const started = Date.now();
+  try {
+    return { ...(await callRemoteTool(url, token, f.tool, f.input)), ms: Date.now() - started };
+  } catch (err) {
+    if (err instanceof ServiceError) throw new McpSellerError(err.message, 502);
+    throw err;
+  }
 }
 
 /**

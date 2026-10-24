@@ -128,6 +128,35 @@ export interface ToolAnswer {
   structuredContent?: Record<string, unknown>;
 }
 
+interface ContentPart {
+  type: string;
+  text?: string;
+  resource?: { text?: string };
+}
+
+const LEFT_OUT_NAMES: Record<string, [string, string]> = {
+  image: ["image", "images"],
+  audio: ["audio clip", "audio clips"],
+  resource: ["file", "files"],
+  resource_link: ["link", "links"],
+};
+
+/** The text of a tool's answer, and a plain count of what cannot be passed on as text ("1 image and 2 links"), if anything. */
+function readContent(content: ContentPart[]): { text: string; leftOut: string } {
+  const kept: string[] = [];
+  const dropped = new Map<string, number>();
+  for (const part of content) {
+    const text = part.type === "text" ? part.text : part.type === "resource" ? part.resource?.text : undefined;
+    if (typeof text === "string") kept.push(text);
+    else dropped.set(part.type, (dropped.get(part.type) ?? 0) + 1);
+  }
+  const counts = [...dropped].map(([type, n]) => {
+    const [one, many] = LEFT_OUT_NAMES[type] ?? ["other item", "other items"];
+    return `${n} ${n === 1 ? one : many}`;
+  });
+  return { text: kept.join("\n"), leftOut: counts.join(" and ") };
+}
+
 /** One tool call. Throws ServiceError for anything that is not a good answer, so the buyer is never charged for it. */
 export async function callRemoteTool(url: string, token: string, tool: string, args: Record<string, unknown>): Promise<ToolAnswer> {
   let result: Awaited<ReturnType<Client["callTool"]>>;
@@ -136,15 +165,14 @@ export async function callRemoteTool(url: string, token: string, tool: string, a
   } catch (err) {
     throw new ServiceError(`MCP server unavailable: ${fail(err, token, "timed out")}`, 502);
   }
-  const content = Array.isArray((result as any).content) ? ((result as any).content as { type: string; text?: string }[]) : [];
-  const text = content
-    .filter((p) => p.type === "text" && typeof p.text === "string")
-    .map((p) => p.text)
-    .join("\n");
+  const content = Array.isArray((result as any).content) ? ((result as any).content as ContentPart[]) : [];
+  const { text, leftOut } = readContent(content);
   if ((result as any).isError) throw new ServiceError(`the tool reported an error: ${redact(text, token).slice(0, 200) || "no details"}`, 502);
   const structured = (result as any).structuredContent as Record<string, unknown> | undefined;
-  if (!text.trim() && !structured) throw new ServiceError("the tool returned nothing", 502);
-  if (text.length > MAX_TEXT_OUT) throw new ServiceError(`the tool answer is too large (${text.length} characters, max ${MAX_TEXT_OUT})`, 502);
+  if (!text.trim() && !structured) throw new ServiceError(leftOut ? `the tool returned only ${leftOut}, and only text can be passed on` : "the tool returned nothing", 502);
   if (structured && JSON.stringify(structured).length > MAX_STRUCTURED_BYTES) throw new ServiceError("the tool's structured answer is too large", 502);
-  return { text: text || JSON.stringify(structured), ...(structured ? { structuredContent: structured } : {}) };
+  // A buyer who pays for a partial answer has to be able to see it was partial.
+  const answer = `${text || JSON.stringify(structured)}${leftOut ? `\n\n[${leftOut} not included]` : ""}`;
+  if (answer.length > MAX_TEXT_OUT) throw new ServiceError(`the tool answer is too large (${answer.length} characters, max ${MAX_TEXT_OUT})`, 502);
+  return { text: answer, ...(structured ? { structuredContent: structured } : {}) };
 }

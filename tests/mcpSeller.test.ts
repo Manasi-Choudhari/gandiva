@@ -597,6 +597,48 @@ describe("MCP server template: the paid route", () => {
     expect(await res.json()).toEqual({ text: "42", structuredContent: { answer: 42 } });
   });
 
+  const IMAGE = { type: "image", data: "aGk=", mimeType: "image/png" };
+
+  it.each([
+    ["one image", [IMAGE], /returned only 1 image, and only text/],
+    ["two images and a link", [IMAGE, IMAGE, { type: "resource_link", uri: "https://example.com/a", name: "a" }], /returned only 2 images and 1 link/],
+    ["an audio clip", [{ type: "audio", data: "aGk=", mimeType: "audio/wav" }], /returned only 1 audio clip/],
+    ["a binary file", [{ type: "resource", resource: { uri: "file:///a", blob: "aGk=" } }], /returned only 1 file/],
+  ])("an answer of %s is not charged, and says why", async (_what, content, why) => {
+    remoteCall = () => ({ content });
+    const res = await callTool("sellerco-echo", { text: "hi" }, "0x" + "08".repeat(32));
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as any).error).toMatch(why);
+    expect(fake.settleCalls).toBe(0);
+  });
+
+  it("text with an image keeps the text and tells the buyer what is missing", async () => {
+    remoteCall = () => ({ content: [{ type: "text", text: "a chart of sales" }, IMAGE] });
+    const res = await callTool("sellerco-echo", { text: "hi" }, "0x" + "09".repeat(32));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ text: "a chart of sales\n\n[1 image not included]" });
+  });
+
+  it("a structured answer with an image still says what is missing", async () => {
+    remoteCall = () => ({ content: [IMAGE], structuredContent: { total: 3 } });
+    const res = await callTool("sellerco-echo", { text: "hi" }, "0x" + "0a".repeat(32));
+    expect(await res.json()).toEqual({ text: '{"total":3}\n\n[1 image not included]', structuredContent: { total: 3 } });
+  });
+
+  it("keeps a text file the tool attached", async () => {
+    remoteCall = () => ({ content: [{ type: "text", text: "see the file" }, { type: "resource", resource: { uri: "file:///a.txt", text: "the file's text" } }] });
+    const res = await callTool("sellerco-echo", { text: "hi" }, "0x" + "0b".repeat(32));
+    expect(await res.json()).toEqual({ text: "see the file\nthe file's text" });
+  });
+
+  it("the note cannot push an answer past the size limit", async () => {
+    remoteCall = () => ({ content: [{ type: "text", text: "y".repeat(50_000) }, IMAGE] });
+    const res = await callTool("sellerco-echo", { text: "hi" }, "0x" + "0c".repeat(32));
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as any).error).toMatch(/too large/);
+    expect(fake.settleCalls).toBe(0);
+  });
+
   it("the same payment cannot be used twice", async () => {
     const nonce = "0x" + "03".repeat(32);
     expect((await callTool("sellerco-echo", { text: "a" }, nonce)).status).toBe(200);

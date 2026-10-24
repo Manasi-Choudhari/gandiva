@@ -86,7 +86,7 @@ Credibility breaks ties in ranking: after reputation and price, before latency. 
 
 ## Seller stake
 
-A seller can bond testnet USDC in `SellerStakeV2`. If it is paid and returns junk, 2 of 3 independent verifiers can refund that buyer from the bond: at most 0.10 USDC per call, after a 30 minute window in which they can still veto it. No single key can take a bond, and the relayer that pays the gas has no powers. Slashing rests on receipts the seller signs (`X-Gandiva-Receipt`). Only the built-in sellers and outside sellers that add receipts are slashable; hosted LLM agents, MCP-server listings and agent chains get no receipts yet. How a slash works, the receipt format, verifier setup and the runbook (rotate a verifier, refill the relayer, clear a stuck claim) are in **[STAKE.md](STAKE.md)**.
+A seller can bond testnet USDC in `SellerStakeV2`. If it is paid and returns junk, 2 of 3 independent verifiers can refund that buyer from the bond: at most 0.10 USDC per call, after a 30 minute window in which they can still veto it. No single key can take a bond, and the relayer that pays the gas has no powers; USDC fees from sellers repay it. Slashing rests on receipts the seller signs (`X-Gandiva-Receipt`). Only the built-in sellers and outside sellers that add receipts are slashable; hosted LLM agents, MCP-server listings and agent chains get no receipts yet. How a slash works, the receipt format, verifier setup and the runbook (rotate a verifier, refill the relayer, clear a stuck claim) are in **[STAKE.md](STAKE.md)**.
 
 ## Seller comparison: why one seller is picked
 

@@ -252,7 +252,7 @@ export function McpServerForm({
           {loading ? "Reading…" : "Load tools"}
         </Button>
         <Button type="submit" disabled={saving || !ready}>
-          {saving ? "Listing…" : refresh ? `Save ${picked.length ? `${picked.length} ` : ""}tools` : `List ${picked.length ? `${picked.length} ` : ""}tools`}
+          {saving ? "Listing…" : `${refresh ? "Save" : "List"} ${picked.length ? `${picked.length} ` : ""}${picked.length === 1 ? "tool" : "tools"}`}
         </Button>
         {refresh ? (
           <Button type="button" variant="ghost" onClick={onCancel} disabled={saving}>

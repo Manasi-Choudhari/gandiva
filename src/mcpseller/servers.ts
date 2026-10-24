@@ -159,6 +159,12 @@ export interface LoadedTool {
   sample: unknown;
 }
 
+/** Required fields only: a made-up value in an optional filter makes a good tool look broken by hiding its results. */
+function sampleInput(schema: Record<string, unknown>): Record<string, unknown> {
+  const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+  return Object.fromEntries(Object.entries(sampleFromSchema(schema) as Record<string, unknown>).filter(([field]) => required.has(field)));
+}
+
 /** Free, owner-only look at a server's tools (nothing is listed or paid). `serverId` is the group being refreshed, if any. */
 export async function loadTools(raw: unknown, wallet: string, now = Date.now()): Promise<{ url: string; name: string; hasToken: boolean; tools: LoadedTool[] }> {
   const f = loadForm.parse(raw);
@@ -181,7 +187,7 @@ export async function loadTools(raw: unknown, wallet: string, now = Date.now()):
         usable: schema !== null,
         access: toolAccess(t),
         listedPrice: listedPrice.get(t.name) ?? null,
-        sample: schema ? sampleFromSchema(schema) : {},
+        sample: schema ? sampleInput(schema) : {},
       };
     }),
   };

@@ -459,9 +459,14 @@ describe("MCP server template: free test calls", () => {
     expect(getService("sellerco-echo")).toBeUndefined();
   });
 
-  it("gives a sample input for each tool to start from", async () => {
+  it("gives a sample input for each tool to start from, with required fields only", async () => {
+    remoteTools = [
+      echoTool(),
+      echoTool({ name: "search", inputSchema: { type: "object", properties: { query: { type: "string" }, author: { type: "string" } }, required: ["query"] } }),
+      echoTool({ name: "whoami", inputSchema: { type: "object", properties: { verbose: { type: "boolean" } } } }),
+    ];
     const body = (await (await loadTools(aliceCookie, { url: URL1 })).json()) as any;
-    expect(body.tools[0].sample).toEqual({ text: "sample text" });
+    expect(body.tools.map((t: any) => t.sample)).toEqual([{ text: "sample text" }, { query: "sample text" }, {}]);
   });
 
   it("uses a saved token only for its exact URL", async () => {

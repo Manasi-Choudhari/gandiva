@@ -3,7 +3,7 @@ import pLimit from "p-limit";
 import { ServiceError } from "../x402/paidRoute.js";
 
 const BASE = "https://books.toscrape.com/";
-const UA = "GandivaScraper/0.1 (+hackathon; respects robots.txt)";
+const UA = "GandivaScraper/0.1 (respects robots.txt)";
 const RATINGS: Record<string, number> = { One: 1, Two: 2, Three: 3, Four: 4, Five: 5 };
 
 export interface Book {

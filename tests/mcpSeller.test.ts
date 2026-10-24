@@ -392,6 +392,48 @@ describe("MCP server template: listing", () => {
   });
 });
 
+describe("MCP server template: deleting a whole server", () => {
+  it("needs a sign-in", async () => {
+    await save(aliceCookie, form());
+    expect((await send("DELETE", "/mine/mcp-servers/sellerco")).status).toBe(401);
+    expect(getService("sellerco-echo")).toBeDefined();
+  });
+
+  it("removes every tool of the server and its stored token, and the paid route with them", async () => {
+    await save(aliceCookie, form());
+    const res = await send("DELETE", "/mine/mcp-servers/sellerco", aliceCookie);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as any).removed.sort()).toEqual(["sellerco-echo", "sellerco-shout"]);
+    expect(getService("sellerco-echo")).toBeUndefined();
+    expect(getService("sellerco-shout")).toBeUndefined();
+    expect(db.prepare("SELECT COUNT(*) AS n FROM mcp_sellers").get()).toEqual({ n: 0 });
+    expect((await callTool("sellerco-echo", { text: "hi" })).status).toBe(404);
+  });
+
+  it("leaves the wallet's other servers and listings alone", async () => {
+    await save(aliceCookie, form());
+    await save(aliceCookie, form({ url: URL2, name: "other", token: undefined }));
+    await send("POST", "/mine/services", aliceCookie, { name: "mine-one", category: "data", endpoint: "https://seller.example/x", price: "1500", inputSchema: { type: "object" }, outputSchema: { type: "object" } });
+    await send("DELETE", "/mine/mcp-servers/sellerco", aliceCookie);
+    expect(getService("other-echo")).toBeDefined();
+    expect(getService("mine-one")).toBeDefined();
+  });
+
+  it("another wallet cannot delete it, and an unknown server is a 404", async () => {
+    await save(aliceCookie, form());
+    expect((await send("DELETE", "/mine/mcp-servers/sellerco", bobCookie)).status).toBe(404);
+    expect(getService("sellerco-echo")).toBeDefined();
+    expect((await send("DELETE", "/mine/mcp-servers/nope", aliceCookie)).status).toBe(404);
+  });
+
+  it("frees the group name and the wallet's listing slots", async () => {
+    await save(aliceCookie, form());
+    await send("DELETE", "/mine/mcp-servers/sellerco", aliceCookie);
+    expect((await save(aliceCookie, form({ url: URL2, name: "sellerco", token: undefined }))).status).toBe(201);
+    expect(getMcpTool("sellerco-echo")!.url).toBe(URL2);
+  });
+});
+
 describe("MCP server template: free test calls", () => {
   const test_ = (cookie: string | undefined, body: unknown) => send("POST", "/mine/mcp-servers/test", cookie, body);
   const trial = (over: Record<string, unknown> = {}) => ({ url: URL1, token: TOKEN, tool: "echo", input: { text: "hi" }, ...over });

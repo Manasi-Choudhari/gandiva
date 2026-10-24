@@ -6,7 +6,7 @@ import { config } from "../config.js";
 import { RegistryError, getService } from "../registry/store.js";
 import { verifyService } from "../registry/probe.js";
 import { McpSellerError } from "./client.js";
-import { loadTools, saveServer, testTool } from "./servers.js";
+import { deleteServer, loadTools, saveServer, testTool } from "./servers.js";
 
 /** Sell-tab "MCP server" template, mounted at /registry/mine/mcp-servers. */
 export const mcpSellerRoutes = new Hono();
@@ -44,6 +44,13 @@ mcpSellerRoutes.post("/tools", bodyLimit({ maxSize: MAX_BODY, onError: tooLarge 
   } catch (err) {
     return failure(c, err);
   }
+});
+
+mcpSellerRoutes.delete("/:serverId", (c) => {
+  const me = currentUser(c);
+  if (!me) return c.json({ error: "sign in with your wallet first" }, 401);
+  const removed = deleteServer(me, c.req.param("serverId"));
+  return removed.length ? c.json({ removed }) : c.json({ error: "server not found" }, 404);
 });
 
 mcpSellerRoutes.post("/test", bodyLimit({ maxSize: MAX_TEST_BODY, onError: testTooLarge }), async (c) => {

@@ -95,6 +95,7 @@ export interface McpServerForm {
 
 export const loadMcpTools = (form: Pick<McpServerForm, "url" | "token"> & { serverId?: string }) => send<McpToolsLoaded>("POST", "/registry/mine/mcp-servers/tools", form);
 export const saveMcpServer = (form: McpServerForm) => send<McpSaved>("POST", "/registry/mine/mcp-servers", form);
+export const deleteMcpServer = (serverId: string) => send<{ removed: string[] }>("DELETE", `/registry/mine/mcp-servers/${encodeURIComponent(serverId)}`);
 export const testMcpTool = (form: Pick<McpServerForm, "url" | "token"> & { tool: string; input: Record<string, unknown> }) =>
   send<{ text: string; structuredContent?: Record<string, unknown>; ms: number }>("POST", "/registry/mine/mcp-servers/test", form);
 

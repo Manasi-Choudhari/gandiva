@@ -312,6 +312,13 @@ export async function saveServer(raw: unknown, wallet: string, now = Date.now())
   return { serverId, name, url, listed, skipped, removed, hasToken: Boolean(tokenEnc) };
 }
 
+/** Takes every tool of one of this wallet's servers off the marketplace, along with its stored URL and token. */
+export const deleteServer = db.transaction((wallet: string, serverId: string): string[] => {
+  const ids = rowsFor(wallet, serverId).map((r) => r.serviceId);
+  for (const id of ids) deleteService(id);
+  return ids;
+});
+
 /** One paid call to the seller's tool, with the seller's stored URL and token. Throws ServiceError so a failed call is never charged. */
 export async function runMcpTool(row: McpToolRow, input: Record<string, unknown>): Promise<ToolAnswer> {
   let url: string;

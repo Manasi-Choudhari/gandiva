@@ -26,6 +26,16 @@ function ChainStatsLine({ stats }: { stats: ChainStats }) {
   );
 }
 
+/** What the background check of an MCP server last found. Buyers are not charged for a call that fails. */
+function CheckProblem({ text }: { text: string }) {
+  return (
+    <div className="flex w-full items-start gap-1.5 rounded-md border border-warn/30 bg-warn/10 px-2 py-1 text-[11px] text-warn">
+      <ShieldAlertIcon className="mt-0.5 size-3 shrink-0" />
+      <span className="min-w-0 break-words">Last check: {text}. Buyers are not charged if a call fails. Use Refresh server once it is fixed.</span>
+    </div>
+  );
+}
+
 export function MyListings({
   services,
   agents,
@@ -93,6 +103,8 @@ export function MyListings({
       {ordered.map((s) => {
         const server = mcp[s.id]?.serverId;
         const tools = server ? servers.get(server)! : [];
+        // The same words on every tool mean the whole server has the problem, so they are shown once, on its header.
+        const serverProblem = new Set(tools.map((t) => mcp[t.id].problem)).size === 1 ? mcp[tools[0].id].problem : null;
         return (
           <Fragment key={s.id}>
             {tools[0] === s ? (
@@ -108,6 +120,7 @@ export function MyListings({
                     Delete server
                   </Button>
                 </span>
+                {serverProblem ? <CheckProblem text={serverProblem} /> : null}
               </div>
             ) : null}
             <div className="flex flex-col gap-2 rounded-lg border border-border/70 p-3">
@@ -139,6 +152,7 @@ export function MyListings({
               <div className="truncate font-mono text-[11px] text-muted-foreground">
                 {s.method} {s.endpoint}
               </div>
+              {mcp[s.id]?.problem && !serverProblem ? <CheckProblem text={mcp[s.id].problem!} /> : null}
               {s.verification === "mismatch" ? (
                 <div className="flex items-start gap-1.5 rounded-md border border-bad/30 bg-bad/10 px-2 py-1 text-[11px] text-bad">
                   <ShieldAlertIcon className="mt-0.5 size-3 shrink-0" />

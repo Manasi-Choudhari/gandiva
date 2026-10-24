@@ -15,6 +15,7 @@ import { llmAvailable } from "./llm.js";
 import { mcp } from "./mcp/server.js";
 import { startCredibilityRefresh } from "./registry/credibility.js";
 import { verifyBuiltIns } from "./registry/probe.js";
+import { startMcpChecks } from "./mcpseller/health.js";
 import { startClaimWorker } from "./stake/claims.js";
 import { stakeEnabled } from "./stake/index.js";
 import { registry } from "./registry/routes.js";
@@ -70,6 +71,7 @@ seedRegistry(active);
 markInterruptedRuns();
 startResolver();
 startClaimWorker();
+startMcpChecks();
 serve({ fetch: app.fetch, port: config.port }, () => {
   console.log(`Gandiva running on http://localhost:${config.port}  (public: ${config.publicBaseUrl})`);
   console.log(`  web        ${config.publicBaseUrl}/`);

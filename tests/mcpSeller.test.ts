@@ -40,6 +40,8 @@ const { buildSellers } = await import("../src/sellers/index.js");
 const { mcp } = await import("../src/mcp/server.js");
 const { getService } = await import("../src/registry/store.js");
 const { getMcpTool, resetServerChecks } = await import("../src/mcpseller/servers.js");
+const { checkServers, runChecks } = await import("../src/mcpseller/health.js");
+const { workerStatus } = await import("../src/workers.js");
 
 const ORIGIN = "http://localhost:3000";
 const KEY = "ab".repeat(32);
@@ -221,7 +223,7 @@ describe("MCP server template: listing", () => {
     expect(rows[0].token_enc).toMatch(/^v1:/);
     const mine = await (await send("GET", "/mine", aliceCookie)).text();
     expect(mine).not.toContain(TOKEN);
-    expect(JSON.parse(mine).mcp["sellerco-echo"]).toEqual({ serverId: "sellerco", url: URL1, tool: "echo", hasToken: true });
+    expect(JSON.parse(mine).mcp["sellerco-echo"]).toEqual({ serverId: "sellerco", url: URL1, tool: "echo", hasToken: true, problem: null });
     expect(await (await send("GET", "/services/sellerco-echo")).text()).not.toContain(TOKEN);
   });
 
@@ -478,6 +480,123 @@ describe("MCP server template: what buyers can see about a tool", () => {
     expect(tools.find((t) => t.name === "sellerco_bare").annotations).toBeUndefined();
     const listed = JSON.parse((await rpc("tools/call", { name: "list_services", arguments: {} })).content[0].text).services as any[];
     expect(listed.find((s) => s.id === "sellerco-wiper").access).toBe("write");
+  });
+});
+
+describe("MCP server template: the background check", () => {
+  const problemOf = (id: string) => getMcpTool(id)!.checkProblem;
+
+  it("finds nothing wrong with a healthy server, and a cleaned schema is no false alarm", async () => {
+    await save(aliceCookie, form());
+    await checkServers();
+    expect(problemOf("sellerco-echo")).toBeNull();
+    expect(problemOf("sellerco-shout")).toBeNull();
+  });
+
+  it("records a server that is down on every tool, keeps the listings, and clears once it is back", async () => {
+    await save(aliceCookie, form());
+    const working = vi.mocked(globalThis.fetch).getMockImplementation()!;
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error(`connect ECONNREFUSED ${TOKEN}`));
+    await checkServers();
+    expect(problemOf("sellerco-echo")).toMatch(/could not read the tools/);
+    expect(problemOf("sellerco-echo")).not.toContain(TOKEN);
+    expect(problemOf("sellerco-shout")).toBe(problemOf("sellerco-echo"));
+    expect(getService("sellerco-echo")).toBeDefined();
+    vi.spyOn(globalThis, "fetch").mockImplementation(working);
+    await checkServers();
+    expect(problemOf("sellerco-echo")).toBeNull();
+  });
+
+  it("says when the saved token stops working", async () => {
+    await save(aliceCookie, form());
+    vi.spyOn(globalThis, "fetch").mockImplementation((async () => new Response("no", { status: 401 })) as any);
+    await checkServers();
+    expect(problemOf("sellerco-echo")).toMatch(/refused this token/);
+  });
+
+  it("names a tool the server dropped, without taking it off the marketplace", async () => {
+    await save(aliceCookie, form());
+    remoteTools = [echoTool()];
+    await checkServers();
+    expect(problemOf("sellerco-echo")).toBeNull();
+    expect(problemOf("sellerco-shout")).toBe("shout is no longer on the server");
+    expect(getService("sellerco-shout")).toBeDefined();
+  });
+
+  it("notices when a tool's input changed", async () => {
+    await save(aliceCookie, form());
+    remoteTools = [echoTool({ inputSchema: { type: "object", properties: { other: { type: "string" } } } }), echoTool({ name: "shout", description: "Upper-cases the text." })];
+    await checkServers();
+    expect(problemOf("sellerco-echo")).toBe("echo takes different input now");
+    expect(problemOf("sellerco-shout")).toBeNull();
+  });
+
+  it("keeps hints current, so a tool that starts changing data leaves buyer agents' reach", async () => {
+    remoteTools = [echoTool({ annotations: { readOnlyHint: true } })];
+    await save(aliceCookie, form({ tools: picks(["echo"]) }));
+    remoteTools = [echoTool({ annotations: { destructiveHint: true } })];
+    await checkServers();
+    expect(getService("sellerco-echo")!.access).toBe("write");
+  });
+
+  it("gives tools listed before hints were kept their real hint", async () => {
+    remoteTools = [echoTool({ annotations: { readOnlyHint: true } })];
+    await save(aliceCookie, form({ tools: picks(["echo"]) }));
+    db.prepare("UPDATE mcp_sellers SET access = 'unknown'").run();
+    await checkServers();
+    expect(getService("sellerco-echo")!.access).toBe("read");
+  });
+
+  it("one bad server does not stop the next, and each uses its own token", async () => {
+    await save(aliceCookie, form());
+    const bobToken = `test-${generatePrivateKey().slice(2, 26)}`;
+    await save(bobCookie, form({ name: "bobs", token: bobToken }));
+    db.prepare("UPDATE mcp_sellers SET url = 'https://intranet.example/mcp' WHERE server_id = 'sellerco'").run();
+    remoteRequests = [];
+    await checkServers();
+    expect(problemOf("sellerco-echo")).toMatch(/not allowed/);
+    expect(remoteRequests.some((r) => r.url.includes("intranet"))).toBe(false);
+    expect(problemOf("bobs-echo")).toBeNull();
+    expect(remoteRequests.filter((r) => r.method === "POST").every((r) => r.authorization === `Bearer ${bobToken}`)).toBe(true);
+  });
+
+  it("two wallets on the same server are checked apart, each with its own token", async () => {
+    await save(aliceCookie, form());
+    const bobToken = `test-${generatePrivateKey().slice(2, 26)}`;
+    await save(bobCookie, form({ name: "bobs", token: bobToken }));
+    const working = vi.mocked(globalThis.fetch).getMockImplementation()!;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: any, init: any = {}) =>
+      new Headers(init.headers).get("authorization") === `Bearer ${bobToken}` ? new Response("no", { status: 401 }) : working(input, init),
+    );
+    await checkServers();
+    expect(problemOf("sellerco-echo")).toBeNull();
+    expect(problemOf("bobs-echo")).toMatch(/refused this token/);
+  });
+
+  it("reads each server once, not once per tool", async () => {
+    await save(aliceCookie, form());
+    remoteRequests = [];
+    await checkServers();
+    expect(remoteRequests.filter((r) => r.rpc === "tools/list")).toHaveLength(1);
+  });
+
+  it("a save clears the warning, and the seller can see it until then", async () => {
+    await save(aliceCookie, form());
+    remoteTools = [echoTool()];
+    await checkServers();
+    const mine = (await (await send("GET", "/mine", aliceCookie)).json()) as any;
+    expect(mine.mcp["sellerco-shout"].problem).toBe("shout is no longer on the server");
+    remoteTools = [echoTool(), echoTool({ name: "shout", description: "Upper-cases the text." })];
+    await save(aliceCookie, form({ token: undefined }));
+    expect(problemOf("sellerco-shout")).toBeNull();
+  });
+
+  it("a pass that is still running is not started twice, and each pass is reported", async () => {
+    await save(aliceCookie, form());
+    remoteRequests = [];
+    await Promise.all([runChecks(), runChecks()]);
+    expect(remoteRequests.filter((r) => r.rpc === "tools/list")).toHaveLength(1);
+    expect(workerStatus()["mcp-checks"]).toMatchObject({ ok: true });
   });
 });
 

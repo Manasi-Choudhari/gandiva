@@ -22,23 +22,26 @@ export interface McpToolRow {
   /** Encrypted bearer token, or null when the server needs none. */
   tokenEnc: string | null;
   toolName: string;
+  /** What the last background check found wrong, or null. See health.ts. */
+  checkProblem: string | null;
 }
 
-const rowToTool = (r: any): McpToolRow => ({ serviceId: r.service_id, owner: r.owner, serverId: r.server_id, url: r.url, tokenEnc: r.token_enc, toolName: r.tool_name });
+const rowToTool = (r: any): McpToolRow => ({ serviceId: r.service_id, owner: r.owner, serverId: r.server_id, url: r.url, tokenEnc: r.token_enc, toolName: r.tool_name, checkProblem: r.check_problem ?? null });
 
 export const getMcpTool = (serviceId: string): McpToolRow | undefined => {
   const r = db.prepare("SELECT * FROM mcp_sellers WHERE service_id = ?").get(serviceId);
   return r ? rowToTool(r) : undefined;
 };
+export const allMcpTools = (): McpToolRow[] => db.prepare("SELECT * FROM mcp_sellers").all().map(rowToTool);
 export const isMcpService = (serviceId: string): boolean => Boolean(db.prepare("SELECT 1 FROM mcp_sellers WHERE service_id = ?").get(serviceId));
 
 const rowsFor = (wallet: string, serverId: string): McpToolRow[] => db.prepare("SELECT * FROM mcp_sellers WHERE owner = ? AND server_id = ?").all(wallet.toLowerCase(), serverId).map(rowToTool);
 const rowsForUrl = (wallet: string, url: string): McpToolRow[] => db.prepare("SELECT * FROM mcp_sellers WHERE owner = ? AND url = ?").all(wallet.toLowerCase(), url).map(rowToTool);
 
 /** What the Sell tab may show about a wallet's MCP listings. Never the token. */
-export function listMcpFor(wallet: string): Record<string, { serverId: string; url: string; tool: string; hasToken: boolean }> {
+export function listMcpFor(wallet: string): Record<string, { serverId: string; url: string; tool: string; hasToken: boolean; problem: string | null }> {
   const rows = db.prepare("SELECT * FROM mcp_sellers WHERE owner = ?").all(wallet.toLowerCase()).map(rowToTool);
-  return Object.fromEntries(rows.map((r) => [r.serviceId, { serverId: r.serverId, url: r.url, tool: r.toolName, hasToken: Boolean(r.tokenEnc) }]));
+  return Object.fromEntries(rows.map((r) => [r.serviceId, { serverId: r.serverId, url: r.url, tool: r.toolName, hasToken: Boolean(r.tokenEnc), problem: r.checkProblem }]));
 }
 
 /** The token this wallet already saved for exactly this URL. A token is never carried over to a different URL. */
@@ -96,7 +99,7 @@ export function defaultServerName(url: string): string {
 }
 
 /** The schema as the registry stores it: cut descriptions, no `$schema`, always an object, and it must compile. Null = not sellable. */
-function cleanSchema(raw: unknown): Record<string, unknown> | null {
+export function cleanSchema(raw: unknown): Record<string, unknown> | null {
   if (!raw || typeof raw !== "object") return { type: "object", properties: {} };
   const walk = (v: unknown): unknown =>
     Array.isArray(v)
@@ -301,7 +304,7 @@ export async function saveServer(raw: unknown, wallet: string, now = Date.now())
           );
           db.prepare(
             `INSERT INTO mcp_sellers (service_id, owner, server_id, url, token_enc, tool_name, access) VALUES (?,?,?,?,?,?,?)
-             ON CONFLICT(service_id) DO UPDATE SET server_id=excluded.server_id, url=excluded.url, token_enc=excluded.token_enc, tool_name=excluded.tool_name, access=excluded.access`,
+             ON CONFLICT(service_id) DO UPDATE SET server_id=excluded.server_id, url=excluded.url, token_enc=excluded.token_enc, tool_name=excluded.tool_name, access=excluded.access, check_problem=NULL`,
           ).run(s.id, wallet.toLowerCase(), serverId, url, tokenEnc, tool.name, toolAccess(tool));
           return getService(s.id)!;
         })();

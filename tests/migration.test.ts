@@ -63,7 +63,7 @@ describe("db migration from the pre-'unconfirmed' ledger schema", () => {
     process.env.DB_PATH = path;
     const { db } = await import("../src/db.js");
     try {
-      expect(db.prepare("SELECT service_id, access FROM mcp_sellers").all()).toEqual([{ service_id: "hf-search", access: "unknown" }]);
+      expect(db.prepare("SELECT service_id, access, check_problem FROM mcp_sellers").all()).toEqual([{ service_id: "hf-search", access: "unknown", check_problem: null }]);
     } finally {
       db.close();
       process.env.DB_PATH = ":memory:";

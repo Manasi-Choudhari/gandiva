@@ -460,6 +460,8 @@ export interface McpInfo {
   url: string;
   tool: string;
   hasToken: boolean;
+  /** What the last background check of the server found wrong, or null. */
+  problem: string | null;
 }
 
 export interface McpTool {

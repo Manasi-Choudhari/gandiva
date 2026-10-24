@@ -2,7 +2,8 @@
 // 1) every charged ledger row's tx must contain a USDC Transfer buyer -> listed payTo of exactly the paid amount
 // 2) a full log scan of USDC transfers from the buyer since the first ledger tx must sum to the same total
 //    (an agent wallet's withdrawals back to its owner are outgoing transfers too, so they are added to the ledger side)
-// Usage: npm run reconcile [-- <wallet address>]   (default: the shared demo wallet; pass a user's agent wallet to check it)
+// Usage: npm run reconcile [-- [--quick] <wallet address>]   (default: the shared demo wallet; pass a user's agent wallet to check it)
+// --quick does only check 1. The full log scan grows with the wallet's age, too slow for the public RPC on a daily schedule.
 import { createPublicClient, http, parseAbiItem, parseEventLogs, erc20Abi } from "viem";
 import { baseSepolia } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
@@ -10,7 +11,9 @@ import { config, USDC_ADDRESS } from "../src/config.js";
 import { api, units } from "./lib.js";
 
 const client = createPublicClient({ chain: baseSepolia, transport: http(config.rpcUrl) });
-const buyer = (process.argv[2] || privateKeyToAccount(config.buyerPrivateKey as `0x${string}`).address).toLowerCase();
+const args = process.argv.slice(2);
+const quick = args.includes("--quick");
+const buyer = (args.find((a) => a !== "--quick") || privateKeyToAccount(config.buyerPrivateKey as `0x${string}`).address).toLowerCase();
 
 const { entries } = await api<{ entries: any[] }>(`/registry/ledger?buyer=${buyer}`);
 const { withdrawals } = await api<{ withdrawals: any[] }>(`/registry/withdrawals?buyer=${buyer}`);
@@ -78,7 +81,7 @@ for (const w of withdrawals.filter((w) => w.status === "settled")) {
   if (firstBlock === null || receipt.blockNumber < firstBlock) firstBlock = receipt.blockNumber;
 }
 
-if (firstBlock !== null) {
+if (firstBlock !== null && !quick) {
   const latest = await client.getBlockNumber();
   const event = parseAbiItem("event Transfer(address indexed from, address indexed to, uint256 value)");
   let chainTotal = 0n;
@@ -119,4 +122,4 @@ if (problems.length) {
   console.log("\nMISMATCHES:\n" + problems.map((p) => "  - " + p).join("\n"));
   process.exit(1);
 }
-console.log("\nRECONCILED: ledger matches the chain to the last unit.");
+console.log(quick ? "\nRECONCILED (quick): every charged ledger row matches its transaction. The full transfer scan was skipped." : "\nRECONCILED: ledger matches the chain to the last unit.");

@@ -21,6 +21,7 @@
     "stake:veto": "tsx scripts/stake/veto.ts",
     "verifier": "tsx scripts/verifier.ts",
     "keeper": "tsx scripts/keeper.ts",
+    "watchdog": "tsx scripts/watchdog.ts",
     "task": "tsx scripts/run-task.ts",
     "reconcile": "tsx scripts/reconcile.ts",
     "judge:replay": "tsx scripts/judge/replay.ts",

@@ -1,0 +1,43 @@
+# Checks the live system from outside. A failed run is the alert: GitHub emails whoever last changed this workflow's schedule.
+# Hourly: the API, its workers, the relayer's ETH, stuck claims, fee cover, and that the contract holds what it owes.
+# Daily: every charged ledger row of the shared buyer against its transaction.
+# Settings -> Secrets and variables -> Actions: variables GANDIVA_URL, STAKE_CONTRACT and BUYER_ADDRESS (both optional).
+# Holds no secrets. The job is skipped while GANDIVA_URL is empty.
+name: watchdog
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: watchdog
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    if: vars.GANDIVA_URL != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GANDIVA_URL: ${{ vars.GANDIVA_URL }}
+      STAKE_CONTRACT: ${{ vars.STAKE_CONTRACT }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run watchdog
+      - name: Reconcile the ledger
+        if: vars.BUYER_ADDRESS != '' && (github.event.schedule == '41 3 * * *' || github.event_name == 'workflow_dispatch')
+        run: npm run reconcile -- --quick "$BUYER_ADDRESS"
+        env:
+          BUYER_ADDRESS: ${{ vars.BUYER_ADDRESS }}

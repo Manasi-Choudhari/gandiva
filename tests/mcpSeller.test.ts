@@ -1,5 +1,6 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { encodePaymentSignatureHeader } from "@x402/core/http";
 import { Hono } from "hono";
@@ -269,13 +270,15 @@ describe("MCP server template: listing", () => {
   });
 
   it("lists only the picked tools, each at its own price", async () => {
-    const body = (await (await save(aliceCookie, form({ tools: [{ name: "shout", price: "7000" }] }))).json()) as any;
-    expect(body.listed.map((s: any) => s.id)).toEqual(["sellerco-shout"]);
+    remoteTools.push(echoTool({ name: "whisper" }));
+    const body = (await (await save(aliceCookie, form({ tools: [{ name: "shout", price: "7000" }, { name: "whisper", price: "1000" }] }))).json()) as any;
+    expect(body.listed.map((s: any) => s.id).sort()).toEqual(["sellerco-shout", "sellerco-whisper"]);
     expect(body.skipped).toEqual([]);
     expect(getService("sellerco-echo")).toBeUndefined();
     expect(getService("sellerco-shout")!.price).toBe("7000");
-    const asked = await callTool("sellerco-shout", { text: "hi" });
-    expect(((await asked.json()) as any).accepts[0]).toMatchObject({ amount: "7000" });
+    expect(getService("sellerco-whisper")!.price).toBe("1000");
+    const asked = await callTool("sellerco-whisper", { text: "hi" });
+    expect(((await asked.json()) as any).accepts[0]).toMatchObject({ amount: "1000" });
   });
 
   it("unticking a tool takes it off the marketplace, and it stays off on the next save", async () => {
@@ -577,6 +580,125 @@ describe("MCP server template: the paid route", () => {
     expect(res.status).toBe(502);
     expect(((await res.json()) as any).error).toMatch(/not allowed/);
     expect(fake.settleCalls).toBe(0);
+  });
+});
+
+describe("MCP server template: older SSE servers", () => {
+  const OLD = "https://old.example/mcp";
+  let sent: { url: string; method: string; rpc?: string; authorization: string | null; redirect?: string }[];
+  /** What the fake server does when the event stream opens; the default announces where to POST. */
+  let onOpen: (push: (event: string, data: string) => void) => void;
+
+  /** A real MCP server behind the SSE transport: POST to /mcp is refused, GET opens the event stream, POST to /messages carries the calls. */
+  function fakeSseServer(): typeof fetch {
+    let push = (_event: string, _data: string) => {};
+    const s = new Server({ name: "fake-sse-server", version: "1.0.0" }, { capabilities: { tools: {} } });
+    s.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: remoteTools as any }));
+    s.setRequestHandler(CallToolRequestSchema, async (r) => remoteCall(r.params.name, (r.params.arguments ?? {}) as Record<string, unknown>));
+    const transport: Transport = { start: async () => {}, close: async () => {}, send: async (m) => push("message", JSON.stringify(m)) };
+    const connected = s.connect(transport);
+    const encoder = new TextEncoder();
+    return (async (input: any, init: any = {}) => {
+      const url = String(input);
+      const method = init.method ?? "GET";
+      const body = typeof init.body === "string" ? JSON.parse(init.body) : undefined;
+      sent.push({ url, method, rpc: body?.method, authorization: new Headers(init.headers).get("authorization"), redirect: init.redirect });
+      if (url === OLD && method === "POST") return new Response("no", { status: 405 });
+      if (url === OLD) {
+        const stream = new ReadableStream({
+          start(c) {
+            push = (event, data) => c.enqueue(encoder.encode(`event: ${event}\ndata: ${data}\n\n`));
+            onOpen(push);
+          },
+        });
+        return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }
+      if (url.startsWith("https://old.example/messages")) {
+        await connected;
+        transport.onmessage?.(body);
+        return new Response(null, { status: 202 });
+      }
+      return server.request(new URL(url).pathname, init); // the probe of our own route
+    }) as typeof fetch;
+  }
+
+  beforeEach(() => {
+    sent = [];
+    onOpen = (push) => push("endpoint", "/messages?session=1");
+    vi.spyOn(globalThis, "fetch").mockImplementation(fakeSseServer());
+  });
+
+  it("falls back to SSE when the server refuses Streamable HTTP, sending the token and following no redirects", async () => {
+    const res = await loadTools(aliceCookie, { url: OLD, token: TOKEN });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as any).tools.map((t: any) => t.name)).toEqual(["echo", "shout"]);
+    expect(sent.map((r) => r.rpc).filter(Boolean)).toEqual(expect.arrayContaining(["initialize", "tools/list"]));
+    expect(sent.every((r) => r.authorization === `Bearer ${TOKEN}`)).toBe(true);
+    expect(sent.every((r) => r.redirect === "error")).toBe(true);
+  });
+
+  it("sells an SSE server's tool, and the paid call runs exactly once", async () => {
+    expect((await save(aliceCookie, form({ url: OLD, name: "old", tools: picks(["echo"]) }))).status).toBe(201);
+    sent = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(fakeSseServer());
+    const res = await callTool("old-echo", { text: "hello" }, "0x" + "06".repeat(32));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ text: "echo: hello" });
+    expect(sent.filter((r) => r.rpc === "tools/call")).toHaveLength(1);
+    expect(fake.settleCalls).toBe(1);
+  });
+
+  it("refuses a server that sends its calls to another address", async () => {
+    onOpen = (push) => push("endpoint", "https://intranet.example/steal");
+    const res = await loadTools(aliceCookie, { url: OLD, token: TOKEN });
+    expect(res.status).toBe(502);
+    expect(sent.some((r) => r.url.includes("intranet"))).toBe(false);
+  });
+
+  it("gives up on a server that opens the stream and never answers", async () => {
+    onOpen = () => {};
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const pending = loadTools(aliceCookie, { url: OLD });
+      await vi.advanceTimersByTimeAsync(15_001);
+      const res = await pending;
+      expect(res.status).toBe(502);
+      expect(((await res.json()) as any).error).toMatch(/timed out/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("MCP server template: what does not fall back", () => {
+  const answering = (status: number, seen: string[]) =>
+    (async (_input: any, init: any = {}) => {
+      seen.push(init.method ?? "GET");
+      return new Response("nope", { status });
+    }) as typeof fetch;
+
+  it.each([401, 403, 500])("a %i goes no further than the first request", async (status) => {
+    const seen: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(answering(status, seen));
+    expect((await loadTools(aliceCookie, { url: URL1, token: TOKEN })).status).toBe(502);
+    expect(seen).toEqual(["POST"]);
+  });
+
+  it("says plainly when a server wants a sign-in we cannot do", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(answering(401, []));
+    const open = (await (await loadTools(aliceCookie, { url: URL1 })).json()) as any;
+    expect(open.error).toMatch(/needs a sign-in.*bearer token.*OAuth/);
+    const withToken = (await (await loadTools(aliceCookie, { url: URL1, token: TOKEN })).json()) as any;
+    expect(withToken.error).toMatch(/refused this token.*OAuth/);
+    expect(withToken.error).not.toContain(TOKEN);
+  });
+
+  it("a tool call that fails is not tried again", async () => {
+    await save(aliceCookie, form());
+    remoteRequests = [];
+    remoteCall = () => Promise.reject(new Error("boom"));
+    expect((await callTool("sellerco-echo", { text: "hi" }, "0x" + "07".repeat(32))).status).toBe(502);
+    expect(remoteRequests.filter((r) => r.rpc === "tools/call")).toHaveLength(1);
   });
 });
 

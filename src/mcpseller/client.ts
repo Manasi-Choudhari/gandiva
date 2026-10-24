@@ -1,5 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { decryptSecret, SecretsError } from "../crypto/secrets.js";
 import { endpointBlockedReason } from "../registry/probe.js";
 import { ServiceError } from "../x402/paidRoute.js";
@@ -62,16 +64,32 @@ export function readToken(tokenEnc: string | null): string {
   }
 }
 
-/** One short-lived session: connect (the SDK handles mcp-session-id), run `fn`, always close. No redirects are followed. */
+const newClient = () => new Client({ name: "gandiva-mcp-seller", version: "0.1.0" });
+const noRedirects: typeof fetch = (url, init) => fetch(url, { ...init, redirect: "error" });
+/** What an older SSE-only server answers to a Streamable HTTP request, per the MCP spec's backwards-compatibility rule. */
+const SSE_ONLY_ANSWERS = new Set([400, 404, 405]);
+
+/**
+ * One short-lived session: connect (the SDK handles mcp-session-id), run `fn`, always close. No redirects are followed.
+ * Older SSE-only servers get a second try at connecting. Only connecting is retried, so a paid tool call never runs twice.
+ */
 async function withClient<T>(url: string, token: string, timeoutMs: number, fn: (client: Client, signal: AbortSignal) => Promise<T>): Promise<T> {
-  const transport = new StreamableHTTPClientTransport(new URL(url), {
-    requestInit: { redirect: "error", headers: token ? { Authorization: `Bearer ${token}` } : {} },
-  });
-  const client = new Client({ name: "gandiva-mcp-seller", version: "0.1.0" });
+  const requestInit: RequestInit = { redirect: "error", headers: token ? { Authorization: `Bearer ${token}` } : {} };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  // An SSE server can hold the connection open and never send its first event, so the deadline has to cover connecting too.
+  const timedOut = new Promise<never>((_, reject) => ctrl.signal.addEventListener("abort", () => reject(new Error("timed out")), { once: true }));
+  const connect = (c: Client, transport: Transport) => Promise.race([c.connect(transport, { signal: ctrl.signal, timeout: timeoutMs }), timedOut]);
+  let client = newClient();
   try {
-    await client.connect(transport, { signal: ctrl.signal, timeout: timeoutMs });
+    try {
+      await connect(client, new StreamableHTTPClientTransport(new URL(url), { requestInit }));
+    } catch (err) {
+      if (!(err instanceof StreamableHTTPError && SSE_ONLY_ANSWERS.has(err.code ?? 0))) throw err;
+      await client.close().catch(() => {});
+      client = newClient();
+      await connect(client, new SSEClientTransport(new URL(url), { requestInit, eventSourceInit: { fetch: noRedirects } }));
+    }
     return await fn(client, ctrl.signal);
   } finally {
     clearTimeout(timer);
@@ -79,7 +97,12 @@ async function withClient<T>(url: string, token: string, timeoutMs: number, fn: 
   }
 }
 
-const fail = (err: unknown, token: string, ctrlTimeout: string): string => redact(String((err as any)?.message ?? err), token).split("\n")[0].slice(0, 200) || ctrlTimeout;
+const OAUTH_NOTE = "Servers that only allow a browser sign-in (OAuth) are not supported yet.";
+
+const fail = (err: unknown, token: string, ctrlTimeout: string): string => {
+  if ((err as any)?.code === 401) return token ? `the server refused this token. ${OAUTH_NOTE}` : `the server needs a sign-in, so give a bearer token. ${OAUTH_NOTE}`;
+  return redact(String((err as any)?.message ?? err), token).split("\n")[0].slice(0, 200) || ctrlTimeout;
+};
 
 /** Every tool the server offers (first pages only, capped). */
 export async function listRemoteTools(url: string, token: string): Promise<RemoteTool[]> {

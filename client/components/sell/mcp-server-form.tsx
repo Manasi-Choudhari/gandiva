@@ -187,8 +187,8 @@ export function McpServerForm({
       }}
     >
       <p className="text-sm text-muted-foreground">
-        Give us an MCP server (Streamable HTTP, public https), then pick which tools to sell and price each one. A buyer pays your wallet in USDC, we call the tool on your server with your token, and return its answer. If the tool
-        fails or returns nothing, the buyer is not charged.
+        Give us an MCP server (Streamable HTTP or SSE, public https), then pick which tools to sell and price each one. A buyer pays your wallet in USDC, we call the tool on your server with your token, and return its answer. If the
+        tool fails or returns nothing, the buyer is not charged. A server that only runs on your own machine (stdio) needs a bridge that puts it on https first, because we never run your commands on ours.
       </p>
 
       <div className="flex flex-col gap-1.5">

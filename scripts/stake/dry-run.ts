@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { createPublicClient, createTestClient, createWalletClient, encodeAbiParameters, http, keccak256, pad, parseAbi, parseSignature, toHex, type Hex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
+import type { ClaimMessage } from "../../src/stake/verify.js";
 
 const PORT = 8599;
 const API_PORT = 8598;
@@ -21,12 +22,13 @@ const SCHEMA = { type: "object", required: ["rate"], properties: { rate: { type:
 const JUNK = '{"rate":"high"}';
 const GOOD = '{"rate":1.2}';
 const PRICE = 1_000n;
-const BOND = 50_000n;
+const BOND = 100_000n;
+const FEE = 20_000n; // the deploy script's stake and slash fee
 const START = 1_000_000n;
 
 const fork = process.env.FORK_RPC || process.env.BASE_SEPOLIA_RPC || "https://sepolia.base.org";
 const tmp = mkdtempSync(join(tmpdir(), "gandiva-dry-run-"));
-const key = { deployer: generatePrivateKey(), relayer: generatePrivateKey(), receipt: generatePrivateKey(), seller: generatePrivateKey(), buyer: generatePrivateKey(), v1: generatePrivateKey(), v2: generatePrivateKey(), v3: generatePrivateKey(), v4: generatePrivateKey() };
+const key = { deployer: generatePrivateKey(), relayer: generatePrivateKey(), keeper: generatePrivateKey(), receipt: generatePrivateKey(), seller: generatePrivateKey(), buyer: generatePrivateKey(), v1: generatePrivateKey(), v2: generatePrivateKey(), v3: generatePrivateKey(), v4: generatePrivateKey() };
 const addr = (k: Hex) => privateKeyToAccount(k).address;
 const seller = addr(key.seller);
 const buyer = addr(key.buyer);
@@ -51,6 +53,7 @@ const warp = async (seconds: number) => {
   await test.increaseTime({ seconds });
   await test.mine({ blocks: 1 });
 };
+const chainNow = async () => Number((await pub.getBlock()).timestamp) * 1000;
 const fund = async (a: Hex) => {
   const index = keccak256(encodeAbiParameters([{ type: "address" }, { type: "uint256" }], [a, USDC_BALANCES_SLOT]));
   await test.setStorageAt({ address: USDC, index, value: pad(toHex(START), { size: 32 }) });
@@ -81,6 +84,7 @@ async function main() {
   }
   await test.setBalance({ address: addr(key.deployer), value: 10n ** 18n });
   await test.setBalance({ address: addr(key.relayer), value: 10n ** 18n });
+  await test.setBalance({ address: addr(key.keeper), value: 10n ** 18n });
   await fund(seller);
   await fund(buyer);
   check((await usdcOf(buyer)) === START, "buyer and seller hold real USDC on the copy");
@@ -102,15 +106,19 @@ async function main() {
     RELAYER_PRIVATE_KEY: key.relayer,
     SERVER_VERIFIER_KEY: key.v1,
     RECEIPT_SIGNER_KEY: key.receipt,
+    RELAY_MAX_GWEI: "1000", // anvil's gas price says nothing about the chain's; tests/stakeFees.test.ts covers the ceiling
   });
   const { serve } = await import("@hono/node-server");
   const { Hono } = await import("hono");
+  const { fromUnits } = await import("../../src/config.js");
+  const { db } = await import("../../src/db.js");
   const stake = await import("../../src/stake/index.js");
   const { fileClaim, listClaims, runClaims } = await import("../../src/stake/claims.js");
   const { saveEvidence } = await import("../../src/stake/evidence.js");
   const { outputHash, requestHash, schemaHash, signReceipt } = await import("../../src/stake/receipt.js");
   const { stakeRoutes } = await import("../../src/stake/routes.js");
-  const { claimIdOf, rpcChainView, signRotate } = await import("../../src/stake/verify.js");
+  const { claimIdOf, rpcChainView, signClaim, signRotate, signVeto } = await import("../../src/stake/verify.js");
+  const { runKeeper, rpcKeeperChain } = await import("../keeper.js");
   const { runOnce } = await import("../verifier.js");
 
   const app = new Hono();
@@ -136,7 +144,9 @@ async function main() {
 
   try {
     step("2. Seller stakes and registers a receipt signer, gasless");
-    await stake.relayStake(await stake.signStakeWithKey(key.seller, BOND));
+    const refused = await stake.relayReceiptSigner({ seller: buyer, signer: addr(key.receipt), deadline: "0", signature: "0x" }).then(() => "", (e: Error) => e.message);
+    check(/stake first/.test(refused), "a wallet with no bond gets no free receipt signer");
+    await stake.relayStake(await stake.signStakeWithKey(key.seller, BOND + FEE));
     const typed = await stake.prepareReceiptSigner(seller, addr(key.receipt));
     const signature = await privateKeyToAccount(key.seller).signTypedData({
       ...typed,
@@ -145,7 +155,9 @@ async function main() {
     });
     await stake.relayReceiptSigner({ seller, signer: addr(key.receipt), deadline: typed.message.deadline, signature });
     const position = await stake.stakeOf(seller, true);
-    check(position.staked === BOND.toString() && position.slashable, "bond is 0.05 USDC and the seller is slashable");
+    check(position.staked === BOND.toString() && position.slashable, "bond is 0.10 USDC and the seller is slashable");
+    check((await usdcOf(addr(key.relayer))) === FEE, "the 0.02 USDC stake fee reached the relayer");
+    let bond = BOND;
 
     step("3. Junk answer with a valid receipt: kind 1 claim, refunded");
     const p1 = await pay(1);
@@ -162,7 +174,9 @@ async function main() {
     await runClaims(Date.now() + 1801_000);
     check(claimState(1).state === "executed" && claimState(1).paid === PRICE.toString(), "after the window the worker executed it");
     check((await usdcOf(buyer)) === START - PRICE + PRICE, "the buyer got its money back");
-    check((await stake.stakeOf(seller, true)).staked === (BOND - PRICE).toString(), "the refund came out of the bond");
+    bond -= PRICE + FEE;
+    check((await stake.stakeOf(seller, true)).staked === bond.toString(), "the refund and the slash fee came out of the bond");
+    check((await usdcOf(addr(key.relayer))) === 2n * FEE, "the slash fee reached the relayer");
 
     step("4. Paid, nothing valid came back: kind 2 claim, seller rebuts it");
     const p2 = await pay(2);
@@ -179,7 +193,8 @@ async function main() {
     check((await outside(key.v2)).vetoed === 1, "outside verifier checked the rebuttal and signed a veto");
     await runClaims();
     check(claimState(2).state === "vetoed", "2 veto signatures closed the claim on chain");
-    check((await stake.stakeOf(seller, true)).staked === (BOND - PRICE).toString(), "the bond was not touched");
+    bond -= FEE;
+    check((await stake.stakeOf(seller, true)).staked === bond.toString(), "no refund left the bond, only the slash fee");
 
     step("5. Verifier rotation");
     const set = [addr(key.v1), addr(key.v2), addr(key.v4)] as [Hex, Hex, Hex];
@@ -188,34 +203,100 @@ async function main() {
     await stake.rotateOnChain(set, rotation.deadline, await Promise.all(signers.map((k) => signRotate(k, rotation, contract!))));
     check((await stake.verifierSet()).includes(addr(key.v4)) && !(await stake.verifierSet()).includes(addr(key.v3)), "verifier 3 is out, verifier 4 is in");
 
-    step("6. A rotated-out key, and a bond held back by an open claim");
+    step("6. An outsider executes a refund first, so it earns the fee");
+    const p4 = await pay(4);
+    fileClaim({ ledgerId: 4, evidence: evidence(4, p4, JUNK, await receiptFor(JUNK, p4.nonce)), seller, buyer });
+    await runClaims();
+    await runClaims();
+    await outside(key.v2);
+    await runClaims();
+    check(claimState(4).state === "proposed", "proposed on chain");
+    await warp(1801);
+    const keeper = createWalletClient({ account: privateKeyToAccount(key.keeper), chain: baseSepolia, transport: http(RPC) });
+    const keeperTx = await keeper.writeContract({ address: contract!, abi: parseAbi(["function executeSlash(bytes32 id) returns (uint256)"]), functionName: "executeSlash", args: [claimIdOf(seller, buyer, p4.nonce)] });
+    await pub.waitForTransactionReceipt({ hash: keeperTx });
+    await runClaims();
+    check(claimState(4).state === "executed" && claimState(4).paid === PRICE.toString(), "the worker adopted it and read the real refund from the chain");
+    check((await usdcOf(addr(key.keeper))) === FEE, "the fee went to the outsider that paid the gas");
+    bond -= PRICE + FEE;
+
+    step("7. A rotated-out key, and a bond held back by an open claim");
     const p3 = await pay(3);
     fileClaim({ ledgerId: 3, evidence: evidence(3, p3, JUNK, await receiptFor(JUNK, p3.nonce)), seller, buyer });
     await runClaims();
     await runClaims();
     check((await outside(key.v3)).failed === 1 && claimState(3).signatures.length === 1, "the server refused the rotated-out verifier's signature");
     check((await outside(key.v4)).signed === 1, "the new verifier's signature counted");
-    await runClaims();
+    await runClaims(await chainNow()); // on the chain's clock: the warps put the earlier claims' windows in the real future
     check(claimState(3).state === "proposed", "proposed on chain");
 
     const unstake = await stake.prepareUnstake(seller);
+    // From the chain's clock, not prepareUnstake's: the warps above have moved this chain about an hour past the real time.
+    const unstakeBy = (await pub.getBlock()).timestamp + 3600n;
     const unstakeSig = await privateKeyToAccount(key.seller).signTypedData({
       ...unstake,
       domain: { ...unstake.domain, chainId: BigInt(unstake.domain.chainId) },
-      message: { seller, nonce: BigInt(unstake.message.nonce), deadline: BigInt(unstake.message.deadline) },
+      message: { seller, nonce: BigInt(unstake.message.nonce), deadline: unstakeBy },
     });
-    await stake.relayUnstake({ seller, deadline: unstake.message.deadline, signature: unstakeSig });
+    await stake.relayUnstake({ seller, deadline: unstakeBy.toString(), signature: unstakeSig });
+    check(await stake.relayUnstake({ seller, deadline: unstakeBy.toString(), signature: unstakeSig }).then(() => false, (e: Error) => /already unstaking/.test(e.message)), "a repeat unstake is refused before it costs gas");
     await warp(7201);
     check(await stake.withdrawFor(seller).then(() => false, () => true), "withdraw is refused while the claim is open");
     await runClaims(Date.now() + 9100_000);
     check(claimState(3).state === "executed", "the claim executed");
     await stake.withdrawFor(seller);
 
-    step("7. The money adds up");
-    const refunds = 2n * PRICE;
-    check((await usdcOf(buyer)) === START - 3n * PRICE + refunds, "buyer: paid 3 times, refunded twice");
-    check((await usdcOf(seller)) === START + 3n * PRICE - refunds, "seller: got 3 payments, its bond paid 2 refunds, the rest came back");
+    step("8. The money adds up");
+    const refunds = 3n * PRICE;
+    check((await usdcOf(buyer)) === START - 4n * PRICE + refunds, "buyer: paid 4 times, refunded 3 times");
+    check((await usdcOf(seller)) === START + 4n * PRICE - refunds - 5n * FEE, "seller: got 4 payments, paid 3 refunds and 5 fees, the rest came back");
+    check((await usdcOf(addr(key.relayer))) === 4n * FEE, "relayer: earned 4 fees");
+    check((await usdcOf(addr(key.keeper))) === FEE, "outsider: earned 1 fee");
     check((await usdcOf(contract!)) === 0n, "the contract holds nothing");
+
+    step("9. A claim against an empty bond costs no gas");
+    const before = stake.relayerBook();
+    const p5 = await pay(5);
+    fileClaim({ ledgerId: 5, evidence: evidence(5, p5, JUNK, await receiptFor(JUNK, p5.nonce)), seller, buyer });
+    await runClaims();
+    await runClaims();
+    await outside(key.v2);
+    await runClaims(await chainNow());
+    check(claimState(5).state === "no_bond", "closed without going on chain");
+    check(stake.relayerBook().txs === before.txs, "the relayer sent nothing");
+
+    step("10. The relayer's book");
+    const book = stake.relayerBook();
+    check(book.feesUsdc === fromUnits(4n * FEE), `${book.txs} transactions, ${book.gasEth} ETH of gas, ${book.feesUsdc} USDC of fees`);
+    for (const r of db.prepare("SELECT fn, MAX(CAST(gas_used AS INTEGER)) AS gas FROM relayer_book GROUP BY fn ORDER BY id").all() as { fn: string; gas: number }[]) console.log(`      ${r.fn}: ${r.gas} gas`);
+
+    step("11. Drill: 2 stolen verifier keys, with the API down");
+    await fund(seller);
+    const LARGE = 500_000n;
+    const inHour = (await pub.getBlock()).timestamp + 3600n; // the chain's clock again: it is hours ahead by now
+    const typedStake = stake.prepareStake(seller, LARGE + FEE);
+    const stakeSig = await privateKeyToAccount(key.seller).signTypedData({ ...typedStake, message: { ...typedStake.message, value: LARGE + FEE, validAfter: 0n, validBefore: inHour } });
+    await stake.relayStake({ from: seller, value: (LARGE + FEE).toString(), validAfter: "0", validBefore: inHour.toString(), nonce: typedStake.message.nonce, signature: stakeSig });
+    const thief = addr(generatePrivateKey());
+    const madeUp = (n: number): ClaimMessage => ({ seller, buyer: thief, amount: 100_000n, paymentNonce: keccak256(toHex(`made-up-${n}`)), evidence: keccak256(toHex("none")), kind: 1, deadline: inHour });
+    const stolen = async (m: ClaimMessage, keys: Hex[]) => Promise.all([...keys].sort((a, b) => (BigInt(addr(a)) < BigInt(addr(b)) ? -1 : 1)).map((k) => signClaim(k, m, contract!)));
+    check(await stake.proposeOnChain(madeUp(1), await stolen(madeUp(1), [key.v1])).then(() => false, () => true), "1 stolen key cannot open a claim");
+    for (const n of [1, 2, 3]) await stake.proposeOnChain(madeUp(n), await stolen(madeUp(n), [key.v1, key.v2]));
+    const fourth = await stake.proposeOnChain(madeUp(4), await stolen(madeUp(4), [key.v1, key.v2])).then(() => "", (e: Error) => e.message);
+    check(/too many claims/.test(fourth), "2 stolen keys open 3 claims, and the 4th is refused");
+    const firstId = claimIdOf(seller, thief, madeUp(1).paymentNonce);
+    const vetoSigs = await Promise.all([key.v1, key.v2].sort((a, b) => (BigInt(addr(a)) < BigInt(addr(b)) ? -1 : 1)).map((k) => signVeto(k, { id: firstId, deadline: inHour }, contract!)));
+    await stake.vetoOnChain(firstId, inHour, vetoSigs);
+    const looped = await stake.proposeOnChain(madeUp(5), await stolen(madeUp(5), [key.v1, key.v2])).then(() => "", (e: Error) => e.message);
+    check(/too many claims/.test(looped), "vetoing their own claim frees no slot, so they cannot loop for fees");
+
+    await warp(2701);
+    const backup = rpcKeeperChain(pub as any, key.keeper, contract!, keeper as any);
+    const pass = await runKeeper({ chain: backup, lookback: 500n, log: quiet });
+    check(pass.executed === 2 && pass.failed === 0, "with the API down, the backup job executed the other 2 from the chain alone");
+    check((await runKeeper({ chain: backup, lookback: 500n, log: quiet })).executed === 0, "a second pass sends nothing");
+    check((await usdcOf(thief)) === 200_000n, "the thief got those 2 refunds and no more");
+    check((await stake.stakeOf(seller, true)).staked === (LARGE - 200_000n - 3n * FEE).toString(), "the rest of the bond is safe: at most 0.36 USDC per 30 minutes can leave");
   } finally {
     server.close();
   }

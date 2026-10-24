@@ -82,7 +82,7 @@ export function MyListings({
             <span className="font-mono text-sm text-primary">{usdc(s.price)} USDC / call</span>
             <span className="ml-auto flex gap-1">
               {mcp[s.id] ? (
-                <Button size="sm" variant="outline" onClick={() => onRefreshMcp(mcp[s.id], s)} disabled={busy === s.id} title="Re-read the server's tools and update the prices here">
+                <Button size="sm" variant="outline" onClick={() => onRefreshMcp(mcp[s.id], s)} disabled={busy === s.id} title="Change which tools are on sale and their prices">
                   Refresh server
                 </Button>
               ) : (

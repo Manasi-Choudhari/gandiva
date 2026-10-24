@@ -21,7 +21,7 @@ type Template = "endpoint" | "llm" | "chain" | "mcp";
 const TEMPLATES: { id: Template; title: string; text: string; icon: typeof PlugIcon }[] = [
   { id: "endpoint", title: "Bring your own endpoint", text: "You run a server that answers with an x402 402. List its URL, price and schemas.", icon: PlugIcon },
   { id: "llm", title: "LLM agent (Ollama)", text: "No server needed. Give a model, a system prompt and your Ollama key; we host the paid endpoint.", icon: BotIcon },
-  { id: "mcp", title: "MCP server", text: "No server of ours needed. Give an MCP URL (and token); every tool on it is sold per call and pays your wallet.", icon: ServerIcon },
+  { id: "mcp", title: "MCP server", text: "No server of ours needed. Give an MCP URL (and token), pick its tools and price each; every sale pays your wallet.", icon: ServerIcon },
   { id: "chain", title: "Agent chain", text: "No server needed. Pick sellers to hire in order; your agent wallet pays them and keeps the margin.", icon: LinkIcon },
 ];
 
@@ -52,7 +52,7 @@ export default function SellPage() {
 
   const doneMcp = (r: McpSaved) => {
     const parts = [`${r.listed.length} ${r.listed.length === 1 ? "tool" : "tools"} from ${r.name} ${r.listed.length === 1 ? "is" : "are"} listed`];
-    if (r.removed.length) parts.push(`${r.removed.length} the server dropped ${r.removed.length === 1 ? "was" : "were"} removed`);
+    if (r.removed.length) parts.push(`${r.removed.length} left the marketplace`);
     if (r.skipped.length) parts.push(`${r.skipped.length} skipped (${r.skipped.map((s) => `${s.tool}: ${s.reason}`).join("; ")})`);
     setSaved(parts.join(", ") + ".");
     setRefreshing(null);

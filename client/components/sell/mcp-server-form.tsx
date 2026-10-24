@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { loadMcpTools, saveMcpServer } from "@/lib/api";
 import { toUnits, usdc } from "@/lib/format";
-import type { Category, McpInfo, McpSaved, McpToolsLoaded } from "@/lib/types";
+import type { Category, McpInfo, McpSaved, McpTool, McpToolsLoaded } from "@/lib/types";
 import { priceProblem } from "./listing-preview";
 
 const FIELD =
@@ -14,11 +14,32 @@ const FIELD =
 
 const DEFAULT_URL = "https://huggingface.co/mcp";
 const CATEGORIES: Category[] = ["data", "inference", "scraping"];
+const MAX_TOOLS = 20;
+
+type Pick = { on: boolean; price: string };
+
+const ACCESS_LABEL: Record<McpTool["access"], string> = { read: "read only", write: "changes data", unknown: "not declared" };
 
 /**
- * Sell-tab "MCP server" template: give an MCP server's URL (and bearer token), set one price,
- * and every tool it offers is listed as its own paid tool that pays your wallet.
- * `refresh` re-reads a server that is already listed (new tools added, dropped ones removed).
+ * First ticks for a freshly read server. A tool already on sale keeps its price. Anything else starts unticked when
+ * the server is already listed, or when it changes data, so nothing goes on sale without the seller choosing it.
+ */
+function firstPicks(tools: McpTool[], defaultPrice: string): Record<string, Pick> {
+  const relisting = tools.some((t) => t.listedPrice);
+  let ticked = 0;
+  return Object.fromEntries(
+    tools.map((t) => {
+      const on = t.usable && (relisting ? Boolean(t.listedPrice) : t.access !== "write" && ticked < MAX_TOOLS);
+      if (on) ticked++;
+      return [t.name, { on, price: t.listedPrice ? usdc(t.listedPrice) : defaultPrice }];
+    }),
+  );
+}
+
+/**
+ * Sell-tab "MCP server" template: give an MCP server's URL (and bearer token), pick its tools and price each one.
+ * Every picked tool is listed as its own paid tool that pays your wallet.
+ * `refresh` re-reads a server that is already listed, to change its picks and prices.
  */
 export function McpServerForm({
   refresh,
@@ -35,6 +56,7 @@ export function McpServerForm({
   const [priceUsdc, setPriceUsdc] = useState(refresh ? usdc(refresh.price) : "0.002");
   const [category, setCategory] = useState<Category>(refresh?.category ?? "data");
   const [loaded, setLoaded] = useState<McpToolsLoaded | null>(null);
+  const [picks, setPicks] = useState<Record<string, Pick>>({});
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -47,12 +69,18 @@ export function McpServerForm({
     setLoaded(null);
   };
 
+  const pickFor = (tool: string): Pick => picks[tool] ?? { on: false, price: priceUsdc };
+  const setPick = (tool: string, patch: Partial<Pick>) => setPicks((all) => ({ ...all, [tool]: { ...pickFor(tool), ...patch } }));
+  const applyPrice = () => setPicks((all) => Object.fromEntries(Object.entries(all).map(([tool, p]) => [tool, p.on ? { ...p, price: priceUsdc } : p])));
+
   async function load() {
     setLoading(true);
     setError(null);
     setLoaded(null);
     try {
-      setLoaded(await loadMcpTools({ url: url.trim(), ...(token.trim() ? { token: token.trim() } : {}) }));
+      const out = await loadMcpTools({ url: url.trim(), ...(token.trim() ? { token: token.trim() } : {}), ...(refresh ? { serverId: refresh.serverId } : {}) });
+      setPicks(firstPicks(out.tools, priceUsdc));
+      setLoaded(out);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not read that server.");
     } finally {
@@ -60,18 +88,25 @@ export function McpServerForm({
     }
   }
 
+  const picked = loaded?.tools.filter((t) => t.usable && pickFor(t.name).on) ?? [];
+  const leaving = loaded?.tools.filter((t) => t.listedPrice && !pickFor(t.name).on) ?? [];
+  const tooMany = picked.length > MAX_TOOLS;
+
   async function submit() {
     setError(null);
-    const problem = priceProblem(priceUsdc);
-    if (problem) return setError(problem);
+    for (const t of picked) {
+      const problem = priceProblem(pickFor(t.name).price);
+      if (problem) return setError(`${t.name}: ${problem}`);
+    }
     setSaving(true);
     try {
       const saved = await saveMcpServer({
         url: url.trim(),
         ...(token.trim() ? { token: token.trim() } : {}),
         ...(name.trim() ? { name: name.trim() } : {}),
+        ...(refresh ? { changeUrl: true } : {}),
         category,
-        price: toUnits(priceUsdc)!,
+        tools: picked.map((t) => ({ name: t.name, price: toUnits(pickFor(t.name).price)! })),
       });
       setToken("");
       setLoaded(null);
@@ -83,7 +118,7 @@ export function McpServerForm({
     }
   }
 
-  const usable = loaded?.tools.filter((t) => t.usable).length ?? 0;
+  const ready = Boolean(loaded) && picked.length > 0 && !tooMany;
 
   return (
     <form
@@ -91,12 +126,12 @@ export function McpServerForm({
       className="flex max-w-3xl flex-col gap-4"
       onSubmit={(e) => {
         e.preventDefault();
-        if (!saving && loaded && usable) void submit();
+        if (!saving && ready) void submit();
       }}
     >
       <p className="text-sm text-muted-foreground">
-        Give us an MCP server (Streamable HTTP, public https). Every tool on it is listed as its own paid tool: a buyer pays your wallet in USDC, we call the tool on your server with your token, and return its answer. If the
-        tool fails or returns nothing, the buyer is not charged.
+        Give us an MCP server (Streamable HTTP, public https), then pick which tools to sell and price each one. A buyer pays your wallet in USDC, we call the tool on your server with your token, and return its answer. If the tool
+        fails or returns nothing, the buyer is not charged.
       </p>
 
       <div className="flex flex-col gap-1.5">
@@ -124,9 +159,16 @@ export function McpServerForm({
       <div className="grid gap-4 sm:grid-cols-3">
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="m-price" className="text-xs text-muted-foreground">
-            Price per call, every tool (USDC)
+            Price per call (USDC)
           </Label>
-          <Input id="m-price" inputMode="decimal" className="font-mono" value={priceUsdc} onChange={(e) => setPriceUsdc(e.target.value)} />
+          <div className="flex gap-2">
+            <Input id="m-price" inputMode="decimal" className="min-w-0 font-mono" value={priceUsdc} onChange={(e) => setPriceUsdc(e.target.value)} />
+            {loaded ? (
+              <Button type="button" variant="outline" size="sm" className="h-auto shrink-0" onClick={applyPrice}>
+                Set all
+              </Button>
+            ) : null}
+          </div>
         </div>
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="m-category" className="text-xs text-muted-foreground">
@@ -152,8 +194,8 @@ export function McpServerForm({
         <Button type="button" variant="outline" onClick={load} disabled={loading || saving || !url.trim()}>
           {loading ? "Reading…" : "Load tools"}
         </Button>
-        <Button type="submit" disabled={saving || !loaded || !usable}>
-          {saving ? "Listing…" : refresh ? `Refresh ${usable ? `${usable} ` : ""}tools` : `List ${usable ? `all ${usable} ` : ""}tools`}
+        <Button type="submit" disabled={saving || !ready}>
+          {saving ? "Listing…" : refresh ? `Save ${picked.length ? `${picked.length} ` : ""}tools` : `List ${picked.length ? `${picked.length} ` : ""}tools`}
         </Button>
         {refresh ? (
           <Button type="button" variant="ghost" onClick={onCancel} disabled={saving}>
@@ -166,18 +208,48 @@ export function McpServerForm({
       <div aria-live="polite" className="flex flex-col gap-3">
         {error ? <p className="rounded-lg border border-bad/40 bg-bad/10 px-3 py-2 text-sm text-bad">{error}</p> : null}
         {loaded ? (
-          <div className="flex flex-col gap-1 rounded-lg border border-border/70 p-3">
+          <div className="flex flex-col gap-2 rounded-lg border border-border/70 p-3">
             <p className="text-xs text-muted-foreground">
-              {loaded.tools.length} {loaded.tools.length === 1 ? "tool" : "tools"} on this server
-              {loaded.tools.length > usable ? ` (${loaded.tools.length - usable} cannot be sold)` : ""}. Each will cost {priceUsdc || "…"} USDC per call.
+              {loaded.tools.length} {loaded.tools.length === 1 ? "tool" : "tools"} on this server, {picked.length} picked (at most {MAX_TOOLS}). "Not declared" means the server does not say whether a tool changes data, so check it
+              yourself.
             </p>
-            <ul className="flex flex-col gap-1">
-              {loaded.tools.map((t) => (
-                <li key={t.name} className="flex flex-wrap items-baseline gap-x-2 text-xs">
-                  <span className={"font-mono " + (t.usable ? "text-foreground" : "text-muted-foreground line-through")}>{t.name}</span>
-                  <span className="min-w-0 truncate text-muted-foreground">{t.description || (t.usable ? "" : "its input description is too large or not supported")}</span>
-                </li>
-              ))}
+            {leaving.length ? <p className="text-xs text-warn">Saving takes {leaving.map((t) => t.name).join(", ")} off the marketplace.</p> : null}
+            {tooMany ? <p className="text-xs text-bad">Untick {picked.length - MAX_TOOLS} to list the rest.</p> : null}
+            <ul className="flex flex-col divide-y divide-border/60">
+              {loaded.tools.map((t) => {
+                const pick = pickFor(t.name);
+                return (
+                  <li key={t.name} className="flex flex-col gap-1 py-2 first:pt-0 last:pb-0">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <input
+                        id={`m-tool-${t.name}`}
+                        type="checkbox"
+                        className="size-4 accent-primary"
+                        checked={pick.on}
+                        disabled={!t.usable}
+                        onChange={(e) => setPick(t.name, { on: e.target.checked })}
+                      />
+                      <label htmlFor={`m-tool-${t.name}`} className={"min-w-0 break-all font-mono text-xs " + (t.usable ? "text-foreground" : "text-muted-foreground line-through")}>
+                        {t.name}
+                      </label>
+                      <span className={"rounded px-1.5 py-0.5 font-mono text-[10px] " + (t.access === "write" ? "bg-warn/15 text-warn" : "bg-muted text-muted-foreground")}>{ACCESS_LABEL[t.access]}</span>
+                      {t.listedPrice ? <span className="rounded bg-primary/15 px-1.5 py-0.5 font-mono text-[10px] text-primary">on sale</span> : null}
+                      {t.usable ? (
+                        <Input
+                          aria-label={`Price per call for ${t.name}, in USDC`}
+                          inputMode="decimal"
+                          className="ml-auto h-7 w-24 font-mono text-xs"
+                          value={pick.price}
+                          disabled={!pick.on}
+                          onChange={(e) => setPick(t.name, { price: e.target.value })}
+                        />
+                      ) : null}
+                    </div>
+                    <p className="text-xs text-muted-foreground">{t.description || (t.usable ? "" : "its input description is too large or not supported")}</p>
+                    {t.access === "write" && pick.on ? <p className="text-xs text-warn">Anyone who pays can run this with your token.</p> : null}
+                  </li>
+                );
+              })}
             </ul>
           </div>
         ) : null}

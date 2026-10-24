@@ -87,11 +87,13 @@ export interface McpServerForm {
   /** The group the tools are listed under; leave out to use the server's own name. */
   name?: string;
   category: Category;
-  /** USDC smallest units (6 decimals), one price for every tool. */
-  price: string;
+  /** The tools to sell, each at its own price in USDC smallest units (6 decimals). Any other tool leaves the marketplace. */
+  tools: { name: string; price: string }[];
+  /** Refresh may move a group to a new URL; a new listing may not take over a group. */
+  changeUrl?: boolean;
 }
 
-export const loadMcpTools = (form: Pick<McpServerForm, "url" | "token">) => send<McpToolsLoaded>("POST", "/registry/mine/mcp-servers/tools", form);
+export const loadMcpTools = (form: Pick<McpServerForm, "url" | "token"> & { serverId?: string }) => send<McpToolsLoaded>("POST", "/registry/mine/mcp-servers/tools", form);
 export const saveMcpServer = (form: McpServerForm) => send<McpSaved>("POST", "/registry/mine/mcp-servers", form);
 
 export interface ChainForm {

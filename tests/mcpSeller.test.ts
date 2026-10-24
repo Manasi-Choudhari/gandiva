@@ -62,7 +62,9 @@ async function loginCookie(account: typeof alice) {
 
 const send = (method: string, path: string, cookie?: string, body?: unknown) =>
   registry.request(path, { method, headers: { ...(cookie ? { cookie } : {}), "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
-const form = (over: Record<string, unknown> = {}) => ({ url: URL1, token: TOKEN, category: "data", price: "2000", ...over });
+const picks = (names: string[], price = "2000") => names.map((name) => ({ name, price }));
+const form = (over: Record<string, unknown> = {}) => ({ url: URL1, token: TOKEN, category: "data", tools: picks(["echo", "shout"]), ...over });
+const numbered = (n: number) => Array.from({ length: n }, (_, i) => `t${i}`);
 const save = (cookie: string | undefined, body: unknown) => send("POST", "/mine/mcp-servers", cookie, body);
 const loadTools = (cookie: string | undefined, body: unknown) => send("POST", "/mine/mcp-servers/tools", cookie, body);
 
@@ -75,6 +77,7 @@ interface FakeTool {
   title?: string;
   description?: string;
   inputSchema: Record<string, unknown>;
+  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
 }
 const echoTool = (over: Partial<FakeTool> = {}): FakeTool => ({
   name: "echo",
@@ -153,7 +156,7 @@ describe("MCP server template: loading tools", () => {
     const body = (await res.json()) as any;
     expect(body.name).toBe("sellerco");
     expect(body.tools.map((t: any) => t.name)).toEqual(["echo", "shout"]);
-    expect(body.tools[0]).toMatchObject({ description: "Echoes the text back.", usable: true });
+    expect(body.tools[0]).toMatchObject({ description: "Echoes the text back.", usable: true, access: "unknown", listedPrice: null });
     expect(getService("sellerco-echo")).toBeUndefined();
     expect(JSON.stringify(body)).not.toContain(TOKEN);
   });
@@ -189,7 +192,7 @@ describe("MCP server template: loading tools", () => {
 });
 
 describe("MCP server template: listing", () => {
-  it("lists every tool as its own paid listing that pays the signed-in wallet, verified by the registry's own probe", async () => {
+  it("lists each picked tool as its own paid listing that pays the signed-in wallet, verified by the registry's own probe", async () => {
     const res = await save(aliceCookie, form());
     expect(res.status).toBe(201);
     const body = (await res.json()) as any;
@@ -230,11 +233,11 @@ describe("MCP server template: listing", () => {
     expect(getMcpTool("sellerco-echo")!.tokenEnc).toBeNull();
   });
 
-  it("refreshing keeps the saved token, adds new tools and removes the ones the server dropped", async () => {
+  it("refreshing keeps the saved token, adds picked tools and removes the ones the server dropped", async () => {
     await save(aliceCookie, form());
     const first = getMcpTool("sellerco-echo")!.tokenEnc;
     remoteTools = [echoTool(), echoTool({ name: "whisper" })];
-    const res = await save(aliceCookie, form({ token: undefined, price: "3000" }));
+    const res = await save(aliceCookie, form({ token: undefined, tools: picks(["echo", "whisper"], "3000") }));
     expect(res.status).toBe(201);
     const body = (await res.json()) as any;
     expect(body.listed.map((s: any) => s.id)).toEqual(["sellerco-echo", "sellerco-whisper"]);
@@ -257,11 +260,102 @@ describe("MCP server template: listing", () => {
   });
 
   it("lists at most 20 tools per wallet and says which were left out", async () => {
+    await send("POST", "/mine/services", aliceCookie, { name: "mine-one", category: "data", endpoint: "https://seller.example/x", price: "1500", inputSchema: { type: "object" }, outputSchema: { type: "object" } });
     remoteTools = Array.from({ length: 25 }, (_, i) => echoTool({ name: `t${i}` }));
-    const body = (await (await save(aliceCookie, form())).json()) as any;
-    expect(body.listed).toHaveLength(20);
-    expect(body.skipped).toHaveLength(5);
+    const body = (await (await save(aliceCookie, form({ tools: picks(numbered(20)) }))).json()) as any;
+    expect(body.listed).toHaveLength(19);
+    expect(body.skipped).toHaveLength(1);
     expect(body.skipped[0].reason).toMatch(/limit/);
+  });
+
+  it("lists only the picked tools, each at its own price", async () => {
+    const body = (await (await save(aliceCookie, form({ tools: [{ name: "shout", price: "7000" }] }))).json()) as any;
+    expect(body.listed.map((s: any) => s.id)).toEqual(["sellerco-shout"]);
+    expect(body.skipped).toEqual([]);
+    expect(getService("sellerco-echo")).toBeUndefined();
+    expect(getService("sellerco-shout")!.price).toBe("7000");
+    const asked = await callTool("sellerco-shout", { text: "hi" });
+    expect(((await asked.json()) as any).accepts[0]).toMatchObject({ amount: "7000" });
+  });
+
+  it("unticking a tool takes it off the marketplace, and it stays off on the next save", async () => {
+    await save(aliceCookie, form());
+    const body = (await (await save(aliceCookie, form({ token: undefined, tools: picks(["echo"]) }))).json()) as any;
+    expect(body.removed).toEqual(["sellerco-shout"]);
+    expect(getService("sellerco-shout")).toBeUndefined();
+    expect(getMcpTool("sellerco-shout")).toBeUndefined();
+    await save(aliceCookie, form({ token: undefined, tools: picks(["echo"], "2500") }));
+    expect(getService("sellerco-shout")).toBeUndefined();
+    expect(getService("sellerco-echo")!.price).toBe("2500");
+  });
+
+  it("frees an unticked tool's slot before listing a new one, even at the wallet's limit", async () => {
+    remoteTools = Array.from({ length: 21 }, (_, i) => echoTool({ name: `t${i}` }));
+    await save(aliceCookie, form({ tools: picks(numbered(20)) }));
+    const body = (await (await save(aliceCookie, form({ token: undefined, tools: picks(numbered(20).map((_, i) => `t${i + 1}`)) }))).json()) as any;
+    expect(body.removed).toEqual(["sellerco-t0"]);
+    expect(body.skipped).toEqual([]);
+    expect(getService("sellerco-t20")).toBeDefined();
+  });
+
+  it("a save that lists nothing changes nothing", async () => {
+    await save(aliceCookie, form());
+    const res = await save(aliceCookie, form({ token: undefined, tools: picks(["gone"]) }));
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as any).error).toContain("gone (the server no longer offers it)");
+    expect(getService("sellerco-echo")).toBeDefined();
+    expect(getMcpTool("sellerco-shout")).toBeDefined();
+  });
+
+  it("says which picked tools the server no longer offers", async () => {
+    const body = (await (await save(aliceCookie, form({ tools: picks(["echo", "gone"]) }))).json()) as any;
+    expect(body.listed.map((s: any) => s.id)).toEqual(["sellerco-echo"]);
+    expect(body.skipped).toEqual([{ tool: "gone", reason: "the server no longer offers it" }]);
+  });
+
+  it("refuses bad picks", async () => {
+    for (const tools of [[], picks(["echo", "echo"]), picks(numbered(21)), picks(["echo"], "0"), picks(["echo"], "100001"), undefined]) {
+      expect((await save(aliceCookie, form({ tools }))).status, JSON.stringify(tools)).toBe(400);
+    }
+    expect(getService("sellerco-echo")).toBeUndefined();
+  });
+
+  it("shows what is already on sale, at its current price, when the server is read again", async () => {
+    await save(aliceCookie, form({ tools: [{ name: "echo", price: "4000" }] }));
+    const byUrl = (await (await loadTools(aliceCookie, { url: URL1 })).json()) as any;
+    expect(byUrl.tools.map((t: any) => t.listedPrice)).toEqual(["4000", null]);
+    const byGroup = (await (await loadTools(aliceCookie, { url: URL2, serverId: "sellerco" })).json()) as any;
+    expect(byGroup.tools[0].listedPrice).toBe("4000");
+    const bobs = (await (await loadTools(bobCookie, { url: URL1, serverId: "sellerco" })).json()) as any;
+    expect(bobs.tools.every((t: any) => t.listedPrice === null)).toBe(true);
+  });
+
+  it("reports what each tool's hints say", async () => {
+    remoteTools = [
+      echoTool({ name: "reads", annotations: { readOnlyHint: true, destructiveHint: true } }),
+      echoTool({ name: "adds", annotations: { readOnlyHint: false, destructiveHint: false } }),
+      echoTool({ name: "wipes", annotations: { destructiveHint: true } }),
+      echoTool({ name: "open", annotations: {} }),
+      echoTool({ name: "bare" }),
+    ];
+    const body = (await (await loadTools(aliceCookie, { url: URL1 })).json()) as any;
+    expect(Object.fromEntries(body.tools.map((t: any) => [t.name, t.access]))).toEqual({ reads: "read", adds: "write", wipes: "write", open: "unknown", bare: "unknown" });
+  });
+
+  it("will not let a second server take over a group by sharing its name", async () => {
+    await save(aliceCookie, form());
+    const res = await save(aliceCookie, form({ url: URL2, name: "sellerco", token: undefined }));
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as any).error).toContain(URL1);
+    expect(getMcpTool("sellerco-echo")!.url).toBe(URL1);
+    expect(getMcpTool("sellerco-shout")).toBeDefined();
+  });
+
+  it("Refresh may move a group to a new URL, and the old token does not follow it", async () => {
+    await save(aliceCookie, form());
+    const res = await save(aliceCookie, form({ url: URL2, name: "sellerco", token: undefined, changeUrl: true }));
+    expect(res.status).toBe(201);
+    expect(getMcpTool("sellerco-echo")).toMatchObject({ url: URL2, tokenEnc: null });
   });
 
   it("skips a tool whose id is already one of the wallet's other listings, without touching that listing", async () => {

@@ -460,12 +460,22 @@ export interface McpInfo {
   hasToken: boolean;
 }
 
+export interface McpTool {
+  name: string;
+  description: string;
+  usable: boolean;
+  /** What the server says the tool does. "unknown" is common: the hints are optional. */
+  access: "read" | "write" | "unknown";
+  /** The current price in USDC smallest units when the tool is already on sale. */
+  listedPrice: string | null;
+}
+
 export interface McpToolsLoaded {
   url: string;
   /** The listing group name this server gets when the seller gives none. */
   name: string;
   hasToken: boolean;
-  tools: { name: string; description: string; usable: boolean }[];
+  tools: McpTool[];
 }
 
 export interface McpSaved {

@@ -25,6 +25,16 @@ export interface RemoteTool {
   title?: string;
   description?: string;
   inputSchema: Record<string, unknown>;
+  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
+}
+
+export type ToolAccess = "read" | "write" | "unknown";
+
+/** What the server says about a tool. These are hints from the seller's own server, so "unknown" is common and proves nothing. */
+export function toolAccess(tool: Pick<RemoteTool, "annotations">): ToolAccess {
+  const hints = tool.annotations;
+  if (hints?.readOnlyHint === true) return "read";
+  return hints?.readOnlyHint === false || hints?.destructiveHint === true ? "write" : "unknown";
 }
 
 /** An MCP server must be a public https URL, checked again on every call (DNS can change). Returns the cleaned URL. */
@@ -79,7 +89,7 @@ export async function listRemoteTools(url: string, token: string): Promise<Remot
       let cursor: string | undefined;
       for (let page = 0; page < 3; page++) {
         const res = await client.listTools(cursor ? { cursor } : {}, { signal, timeout: LIST_TIMEOUT_MS });
-        for (const t of res.tools) tools.push({ name: t.name, title: t.title, description: t.description, inputSchema: t.inputSchema as Record<string, unknown> });
+        for (const t of res.tools) tools.push({ name: t.name, title: t.title, description: t.description, inputSchema: t.inputSchema as Record<string, unknown>, annotations: t.annotations });
         cursor = res.nextCursor;
         if (!cursor || tools.length > MAX_TOOLS_PER_SERVER * 5) break;
       }

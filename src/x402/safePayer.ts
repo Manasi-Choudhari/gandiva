@@ -4,7 +4,7 @@ import type { PaymentRequired, PaymentRequirements, SettleResponse } from "@x402
 import { registerExactEvmScheme } from "@x402/evm/exact/client";
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
-import { fromUnits, NETWORK } from "../config.js";
+import { fromUnits, NETWORK, USDC_ADDRESS } from "../config.js";
 import { payToProven } from "../registry/credibility.js";
 import { addLedger, type LedgerEntry, type LedgerStatus, type Service } from "../registry/store.js";
 import { fileClaim } from "../stake/claims.js";
@@ -50,6 +50,11 @@ export function checkAgainstListing(service: Service, pr: PaymentRequired): Chec
     if (a.scheme !== "exact") p.push(`scheme ${a.scheme} is not "exact"`);
     if (a.network !== service.network) p.push(`network ${a.network} differs from listed ${service.network}`);
     if (a.asset.toLowerCase() !== service.asset.toLowerCase()) p.push(`token ${a.asset} differs from listed ${service.asset}`);
+    // Budgets and spend caps count USDC units, so another token's amount would mean nothing to them.
+    if (a.asset.toLowerCase() !== USDC_ADDRESS.toLowerCase()) p.push(`token ${a.asset} is not USDC`);
+    // The seller's 402 picks the signing method. Only EIP-3009 leaves the nonce the ledger, spend cap and resolver track.
+    const method = (a.extra as { assetTransferMethod?: unknown } | undefined)?.assetTransferMethod;
+    if (method !== undefined && method !== "eip3009") p.push(`transfer method ${String(method)} is not eip3009`);
     if (a.payTo.toLowerCase() !== service.payTo.toLowerCase()) p.push(`payTo ${a.payTo} differs from listed ${service.payTo}`);
     const amount = /^\d+$/.test(a.amount) ? BigInt(a.amount) : -1n;
     if (amount < 0n) p.push(`amount ${a.amount} is not a valid integer`);
@@ -234,7 +239,8 @@ export class SafePayer {
     let paidRes: Response;
     let payload: Awaited<ReturnType<x402Client["createPaymentPayload"]>>;
     try {
-      payload = await this.client.createPaymentPayload({ ...pr, accepts: [check.accept] });
+      // Extensions go too: the seller wrote them, and they can ask the library to sign more than this one payment.
+      payload = await this.client.createPaymentPayload({ ...pr, accepts: [check.accept], extensions: undefined });
     } catch (err: any) {
       // Nothing was signed, so nothing can have moved.
       reservation.release();
@@ -286,7 +292,9 @@ export class SafePayer {
         reservation.commit();
         return finish({ status: "paid_output_rejected", paid: asked, asked, txHash: settle!.transaction, reason: `seller settled but returned ${paidRes.status}` });
       }
-      reservation.release();
+      // The reservation is neither released nor committed: a seller's word that it failed proves nothing, and it can still
+      // settle the signature it holds. Freeing the money here would let one seller spend a run past its budget. The ledger
+      // calls this not charged, and the resolver corrects it if the chain says otherwise.
       let msg = typeof body === "object" && body?.error ? body.error : JSON.stringify(body).slice(0, 200);
       const again = paidRes.headers.get("PAYMENT-REQUIRED");
       if (again) {

@@ -67,15 +67,25 @@ describe("SafePayer: outcomes after the payment is signed", () => {
     expect(r).toMatchObject({ status: "paid_output_rejected", paid: 1000n, txHash: TX });
   });
 
-  it("an explicit seller error without settlement is 'failed, not charged' and frees the budget", async () => {
+  it("an explicit seller error without settlement is 'failed, not charged', and the budget stays held", async () => {
     stubSeller(() => json({ error: "service failed, not charged", charged: false }, 502));
     const budget = new BudgetLedger(10_000n);
     const r = await payer.call(service(), {}, { budget });
     expect(r).toMatchObject({ status: "failed_not_charged", paid: 0n });
     expect(budget.spent).toBe(0n);
-    expect(budget.remaining).toBe(10_000n);
+    expect(budget.remaining).toBe(9_000n); // the seller still holds a live signature
     // the authorisation is kept so the resolver can double-check the chain until it expires
     expect(row(r.ledgerId).auth_nonce).toBeTruthy();
+  });
+
+  it("a seller claiming failure while it keeps the signature cannot push a run past its budget", async () => {
+    let signed = 0;
+    vi.stubGlobal("fetch", vi.fn(async (_u: unknown, init: any) => (init?.headers?.["PAYMENT-SIGNATURE"] ? (signed++, json({ error: "sorry", charged: false }, 500)) : challenge402())));
+    const budget = new BudgetLedger(3_000n);
+    const results = [];
+    for (let i = 0; i < 6; i++) results.push(await payer.call(service(), {}, { budget }));
+    expect(signed).toBe(3);
+    expect(results.at(-1)!.reason).toMatch(/^budget:/);
   });
 
   it("a seller that settles but then errors is charged (paid, output rejected)", async () => {
@@ -141,6 +151,36 @@ describe("SafePayer: hostile sellers before anything is signed", () => {
     expect(r.status).toBe("refused");
     expect(r.reason).toMatch(/price check/);
     expect(row(r.ledgerId).status).toBe("refused");
+  });
+
+  it.each([
+    ["Permit2", { extra: { name: "USDC", version: "2", assetTransferMethod: "permit2" } }],
+    ["a made-up method", { extra: { assetTransferMethod: "anything" } }],
+  ])("a 402 asking for %s instead of EIP-3009 is refused before anything is signed", async (_, over) => {
+    const fetchMock = vi.fn(async () => challenge402(accept(over)));
+    vi.stubGlobal("fetch", fetchMock);
+    const r = await payer.call(service(), {}, { budget: new BudgetLedger(10_000n) });
+    expect(r.status).toBe("refused");
+    expect(r.reason).toMatch(/is not eip3009/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("a listing in any token but USDC is refused, because budgets count USDC", async () => {
+    const other = "0x000000000000000000000000000000000000dEaD";
+    const fetchMock = vi.fn(async () => challenge402(accept({ asset: other })));
+    vi.stubGlobal("fetch", fetchMock);
+    const r = await payer.call(service({ asset: other }), {}, { budget: new BudgetLedger(10_000n) });
+    expect(r.status).toBe("refused");
+    expect(r.reason).toMatch(/is not USDC/);
+  });
+
+  it("drops the seller's extensions, so it cannot ask the library to sign anything else", async () => {
+    const seen: any[] = [];
+    const spy = vi.spyOn((payer as any).client, "createPaymentPayload").mockImplementation(async (pr: any) => (seen.push(pr), Promise.reject(new Error("stop here"))));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ x402Version: 2, accepts: [accept()], extensions: { eip2612GasSponsoring: {} } }), { status: 402 })));
+    await payer.call(service(), {}, { budget: new BudgetLedger(10_000n) });
+    spy.mockRestore();
+    expect(seen[0].extensions).toBeUndefined();
   });
 
   it("a 402 whose accepts is not a list is refused", async () => {

@@ -31,7 +31,8 @@ export const canonical = (v: unknown): string =>
 export function groupServices(ranked: ServiceWithReputation[]): ServiceGroup[] {
   const groups = new Map<string, ServiceGroup>();
   for (const s of ranked) {
-    const key = canonical([s.category, s.inputSchema, s.outputSchema]);
+    // Two tools on one MCP server can share a schema and do opposite things (read_file, delete_file), so each is its own job.
+    const key = canonical(s.access ? ["mcp-tool", s.id] : [s.category, s.inputSchema, s.outputSchema]);
     const price = BigInt(s.price);
     const g = groups.get(key);
     if (!g) {

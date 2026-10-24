@@ -437,6 +437,50 @@ describe("MCP server template: deleting a whole server", () => {
   });
 });
 
+describe("MCP server template: what buyers can see about a tool", () => {
+  it("keeps the server's hint on the listing, and only MCP tools carry one", async () => {
+    remoteTools = [echoTool({ name: "reader", annotations: { readOnlyHint: true } }), echoTool({ name: "wiper", annotations: { destructiveHint: true } }), echoTool({ name: "bare" })];
+    await save(aliceCookie, form({ tools: picks(["reader", "wiper", "bare"]) }));
+    expect(getService("sellerco-reader")!.access).toBe("read");
+    expect(getService("sellerco-wiper")!.access).toBe("write");
+    expect(getService("sellerco-bare")!.access).toBe("unknown");
+    const shown = (await (await send("GET", "/services")).json()) as any;
+    expect(shown.services.find((s: any) => s.id === "sellerco-wiper").access).toBe("write");
+    const own = await send("POST", "/mine/services", aliceCookie, { name: "mine-one", category: "data", endpoint: "https://seller.example/x", price: "1500", inputSchema: { type: "object" }, outputSchema: { type: "object" } });
+    expect(((await own.json()) as any).service?.access).toBeUndefined();
+    expect(getService("mine-one")).not.toHaveProperty("access");
+  });
+
+  it("a refresh picks up a hint that changed", async () => {
+    remoteTools = [echoTool({ annotations: { readOnlyHint: true } })];
+    await save(aliceCookie, form({ tools: picks(["echo"]) }));
+    remoteTools = [echoTool({ annotations: { readOnlyHint: false } })];
+    await save(aliceCookie, form({ token: undefined, tools: picks(["echo"]) }));
+    expect(getService("sellerco-echo")!.access).toBe("write");
+  });
+
+  it("tells our own /mcp clients too", async () => {
+    remoteTools = [echoTool({ name: "reader", annotations: { readOnlyHint: true } }), echoTool({ name: "wiper", annotations: { destructiveHint: true } }), echoTool({ name: "bare" })];
+    await save(aliceCookie, form({ tools: picks(["reader", "wiper", "bare"]) }));
+    const rpc = async (method: string, params?: unknown) =>
+      ((await (
+        await mcp.request("/", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+        })
+      ).json()) as any).result;
+    const tools = (await rpc("tools/list")).tools as any[];
+    expect(tools.find((t) => t.name === "sellerco_reader").annotations).toEqual({ readOnlyHint: true });
+    const wiper = tools.find((t) => t.name === "sellerco_wiper");
+    expect(wiper.annotations).toEqual({ readOnlyHint: false });
+    expect(wiper.description).toMatch(/^CHANGES DATA/);
+    expect(tools.find((t) => t.name === "sellerco_bare").annotations).toBeUndefined();
+    const listed = JSON.parse((await rpc("tools/call", { name: "list_services", arguments: {} })).content[0].text).services as any[];
+    expect(listed.find((s) => s.id === "sellerco-wiper").access).toBe("write");
+  });
+});
+
 describe("MCP server template: free test calls", () => {
   const test_ = (cookie: string | undefined, body: unknown) => send("POST", "/mine/mcp-servers/test", cookie, body);
   const trial = (over: Record<string, unknown> = {}) => ({ url: URL1, token: TOKEN, tool: "echo", input: { text: "hi" }, ...over });

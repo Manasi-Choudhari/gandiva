@@ -39,6 +39,8 @@ export interface Service {
   credibility?: { score: number; level: CredibilityLevel } | null;
   /** Set when this listing is an agent chain: the sellers it hires and pays to do the job. */
   chain?: { hires: string[] } | null;
+  /** MCP tools only: what the seller's server says the tool does. Buyer agents never pick "write" by themselves. */
+  access?: "read" | "write" | "unknown";
   /** What the listing is: a chain (hires and pays other sellers), an AI agent (hosted LLM seller) or a data API (everything else). */
   kind?: Kind;
 }

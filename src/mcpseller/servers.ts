@@ -4,10 +4,10 @@ import { sampleFromSchema } from "../buyer/catalogue.js";
 import { config, MAX_PRICE_UNITS } from "../config.js";
 import { encryptSecret, secretsConfigured } from "../crypto/secrets.js";
 import { db } from "../db.js";
-import { CATEGORIES, deleteService, getService, listByOwner, MAX_LISTINGS_PER_WALLET, RegistryError, registerForWallet, slug, walletOwner, type Service } from "../registry/store.js";
+import { CATEGORIES, deleteService, getService, listByOwner, MAX_LISTINGS_PER_WALLET, RegistryError, registerForWallet, slug, walletOwner, type Service, type ToolAccess } from "../registry/store.js";
 import { paidRoute, ServiceError } from "../x402/paidRoute.js";
 import { hasRiskyPattern, validateInput } from "../x402/schema.js";
-import { callRemoteTool, checkMcpUrl, listRemoteTools, MAX_TEXT_OUT, MAX_TOOLS_PER_SERVER, McpSellerError, readToken, toolAccess, type RemoteTool, type ToolAccess, type ToolAnswer } from "./client.js";
+import { callRemoteTool, checkMcpUrl, listRemoteTools, MAX_TEXT_OUT, MAX_TOOLS_PER_SERVER, McpSellerError, readToken, toolAccess, type RemoteTool, type ToolAnswer } from "./client.js";
 
 const MAX_SCHEMA_BYTES = 8000;
 const MAX_SCHEMA_DESCRIPTION = 500;
@@ -300,10 +300,10 @@ export async function saveServer(raw: unknown, wallet: string, now = Date.now())
             wallet,
           );
           db.prepare(
-            `INSERT INTO mcp_sellers (service_id, owner, server_id, url, token_enc, tool_name) VALUES (?,?,?,?,?,?)
-             ON CONFLICT(service_id) DO UPDATE SET server_id=excluded.server_id, url=excluded.url, token_enc=excluded.token_enc, tool_name=excluded.tool_name`,
-          ).run(s.id, wallet.toLowerCase(), serverId, url, tokenEnc, tool.name);
-          return s;
+            `INSERT INTO mcp_sellers (service_id, owner, server_id, url, token_enc, tool_name, access) VALUES (?,?,?,?,?,?,?)
+             ON CONFLICT(service_id) DO UPDATE SET server_id=excluded.server_id, url=excluded.url, token_enc=excluded.token_enc, tool_name=excluded.tool_name, access=excluded.access`,
+          ).run(s.id, wallet.toLowerCase(), serverId, url, tokenEnc, tool.name, toolAccess(tool));
+          return getService(s.id)!;
         })();
         done.push(service);
       } catch (err) {

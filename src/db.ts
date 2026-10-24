@@ -100,7 +100,8 @@ CREATE TABLE IF NOT EXISTS mcp_sellers (
   url TEXT NOT NULL,
   token_enc TEXT,
   tool_name TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  access TEXT NOT NULL DEFAULT 'unknown'
 );
 
 -- Sell-tab "agent chain" listings: the fixed steps (which sellers to hire, in order, and where each input comes from).
@@ -178,6 +179,10 @@ if (!serviceColumns.includes("verification")) {
     ALTER TABLE services ADD COLUMN verified_at TEXT;
   `);
 }
+
+// Migrate MCP tools listed before the server's read/write hints were kept: "unknown" until the seller refreshes.
+const mcpColumns = (db.prepare("PRAGMA table_info(mcp_sellers)").all() as { name: string }[]).map((c) => c.name);
+if (!mcpColumns.includes("access")) db.exec("ALTER TABLE mcp_sellers ADD COLUMN access TEXT NOT NULL DEFAULT 'unknown'");
 
 // Migrate users created before they could bring their own planner LLM (Ollama) key.
 const userColumns = (db.prepare("PRAGMA table_info(users)").all() as { name: string }[]).map((c) => c.name);

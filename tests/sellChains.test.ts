@@ -283,6 +283,24 @@ describe("agent chain: running", () => {
     expect(out.hired.find((h) => h.service === "junk-fx")?.status).toBe("paid_output_rejected");
   });
 
+  it("never swaps an MCP tool for another tool with the same schema, which may do the opposite", async () => {
+    const tools = listed({ "junk-fx": { access: "read" }, "fx-rates": { access: "write" } });
+    const form = withStep(1, { serviceId: "junk-fx", input: { from: { from: "buyer", field: "currency" }, to: { from: "step", step: 1, field: "currency" } } });
+    const pl = planChain(form as any, "my-chain", lookupIn(tools));
+    const p = fakePay();
+    await expect(runChain(chainOf(pl, 20000n), { city: "Tokyo", currency: "GBP" }, deps(p.pay, { services: () => tools }))).rejects.toBeInstanceOf(ServiceError);
+    expect(p.calls.map((c) => c.id)).toEqual(["city-info", "junk-fx"]);
+  });
+
+  it("does not swap a plain seller for an MCP tool either", async () => {
+    const tools = listed({ "fx-rates": { access: "read" } });
+    const form = withStep(1, { serviceId: "junk-fx", input: { from: { from: "buyer", field: "currency" }, to: { from: "step", step: 1, field: "currency" } } });
+    const pl = planChain(form as any, "my-chain", lookupIn(tools));
+    const p = fakePay();
+    await expect(runChain(chainOf(pl, 20000n), { city: "Tokyo", currency: "GBP" }, deps(p.pay, { services: () => tools }))).rejects.toBeInstanceOf(ServiceError);
+    expect(p.calls.map((c) => c.id)).toEqual(["city-info", "junk-fx"]);
+  });
+
   it("stops before overspending its sub-budget and fails so the buyer is not charged", async () => {
     const p = fakePay();
     const run = runChain(chainOf(plan(), 3000n), { city: "Tokyo", currency: "GBP" }, deps(p.pay));

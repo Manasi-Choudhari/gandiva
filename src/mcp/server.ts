@@ -7,7 +7,7 @@ import type { x402ResourceServer } from "@x402/core/server";
 import { config, fromUnits, NETWORK, USDC_ADDRESS, USDC_EIP712 } from "../config.js";
 import { askModel, getHosted } from "../hosted/agents.js";
 import { getMcpTool, runMcpTool } from "../mcpseller/servers.js";
-import { addSale, getService, listServices, reputationFor, searchServices, walletOwner } from "../registry/store.js";
+import { addSale, getService, listServices, reputationFor, searchServices, walletOwner, type ToolAccess } from "../registry/store.js";
 import { activeSellerDefs } from "../sellers/index.js";
 import { nonceKey, replayGuard, ServiceError } from "../x402/paidRoute.js";
 import { getResourceServer } from "../x402/resourceServer.js";
@@ -30,6 +30,8 @@ interface PaidTool {
   outputSchema: Record<string, unknown>;
   /** Honest sellers check their own output before settling. */
   selfValidate: boolean;
+  /** MCP-seller tools only: passed on so an MCP client can warn before calling a tool that changes data. */
+  access?: ToolAccess;
   run: (input: any) => Promise<unknown>;
 }
 
@@ -77,12 +79,13 @@ export function paidTools(): PaidTool[] {
       {
         name: toolName(s.id),
         serviceId: s.id,
-        description: `${s.description} (Sell-tab MCP tool, paid to ${s.payTo})`,
+        description: `${s.access === "write" ? "CHANGES DATA on the seller's server. " : ""}${s.description} (Sell-tab MCP tool, paid to ${s.payTo})`,
         price: BigInt(s.price),
         payTo: s.payTo,
         inputSchema: s.inputSchema,
         outputSchema: s.outputSchema,
         selfValidate: true,
+        access: s.access,
         run: (input: Record<string, unknown>) => runMcpTool(row, input),
       },
     ];
@@ -121,6 +124,7 @@ function freeTool(name: string, args: Record<string, unknown>): ToolResult {
       category: s.category,
       price_usdc: fromUnits(s.price),
       payTo: s.payTo,
+      ...(s.access ? { access: s.access } : {}),
       verification: s.verification,
       reputation: { score: Number(s.reputation.score.toFixed(3)), successRate: s.reputation.successRate, attempts: s.reputation.attempts, isNew: s.reputation.isNew },
       description: s.description,
@@ -205,6 +209,7 @@ function buildServer(): Server {
         description: `${t.description} Costs ${fromUnits(t.price)} USDC per call (x402, ${NETWORK}), paid to ${t.payTo}.`,
         inputSchema: t.inputSchema as any,
         outputSchema: undefined,
+        ...(t.access === "read" ? { annotations: { readOnlyHint: true } } : t.access === "write" ? { annotations: { readOnlyHint: false } } : {}),
       })),
     ],
   }));

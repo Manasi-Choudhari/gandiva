@@ -120,6 +120,7 @@ export function MyListings({
                 {mcp[s.id] ? (
                   <span className="rounded bg-primary/15 px-1.5 py-0.5 font-mono text-[10px] text-primary">MCP tool · {mcp[s.id].serverId}</span>
                 ) : null}
+                {s.access === "write" ? <span className="rounded bg-warn/15 px-1.5 py-0.5 font-mono text-[10px] text-warn">changes data</span> : null}
                 {chains[s.id] ? (
                   <span className="rounded bg-primary/15 px-1.5 py-0.5 font-mono text-[10px] text-primary">agent chain · {chains[s.id].hires.join(" → ")}</span>
                 ) : null}

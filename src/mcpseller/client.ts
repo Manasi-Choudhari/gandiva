@@ -4,6 +4,7 @@ import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontex
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { decryptSecret, SecretsError } from "../crypto/secrets.js";
 import { endpointBlockedReason } from "../registry/probe.js";
+import type { ToolAccess } from "../registry/store.js";
 import { ServiceError } from "../x402/paidRoute.js";
 
 export const MAX_TOOLS_PER_SERVER = 20;
@@ -29,8 +30,6 @@ export interface RemoteTool {
   inputSchema: Record<string, unknown>;
   annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
 }
-
-export type ToolAccess = "read" | "write" | "unknown";
 
 /** What the server says about a tool. These are hints from the seller's own server, so "unknown" is common and proves nothing. */
 export function toolAccess(tool: Pick<RemoteTool, "annotations">): ToolAccess {

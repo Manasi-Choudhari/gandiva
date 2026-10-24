@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { config, EXPLORER_TX, toUnits } from "../config.js";
 import { db } from "../db.js";
 import { chatWith, type PlannerLlm } from "../llm.js";
-import { getService, searchServices, type Category, type Service } from "../registry/store.js";
+import { agentMayPick, blindMayPick, getService, searchServices, type Category, type Service } from "../registry/store.js";
 import { BudgetLedger } from "../x402/budget.js";
 import { validateInput } from "../x402/schema.js";
 import { SafePayer } from "../x402/safePayer.js";
@@ -101,7 +101,7 @@ const POOLS = {
   hindi: (s: Service) => s.category === "inference" && props(s, "outputSchema").language?.const === "hi",
 };
 type Pool = keyof typeof POOLS;
-const poolServices = (pool: Pool) => searchServices().filter(POOLS[pool]);
+const poolServices = (pool: Pool) => searchServices().filter(POOLS[pool]).filter(blindMayPick);
 
 function buy(ctx: Ctx, pool: Pool, step: string, input: Record<string, unknown>) {
   return buyFrom(ctx, pool, poolServices(pool), step, input);
@@ -187,7 +187,7 @@ async function executeTask(run: RunState, mode: NonNullable<StartOptions["mode"]
   if (mode !== "legacy") {
     const outcome = await runAgent(ctx, {
       chat: chatWith(llm, { json: true, timeoutMs: 60_000, temperature: 0 }),
-      services: () => searchServices(),
+      services: () => searchServices().filter(agentMayPick),
     });
     if (outcome.handled) {
       run.finishedAt = new Date().toISOString();
@@ -342,7 +342,7 @@ export async function buyCategory(opts: { category: Category; input: Record<stri
   rememberRun(run);
   const budget = new BudgetLedger(BigInt(run.budget));
   // Only sellers whose listed input fits the request can do this job (a category now holds different kinds of work).
-  const fits = searchServices({ category: opts.category }).filter((s) => validateInput(s.inputSchema, structuredClone(opts.input)).ok);
+  const fits = searchServices({ category: opts.category }).filter((s) => blindMayPick(s) && validateInput(s.inputSchema, structuredClone(opts.input)).ok);
   const ctx = new Ctx(run, budget, run.maxConcurrency, pay);
   // A caller may name a seller to try first; it still has to pass every check, and failing over works as usual.
   if (opts.prefer && fits.some((s) => s.id === opts.prefer)) ctx.preferred.set(opts.category, opts.prefer);

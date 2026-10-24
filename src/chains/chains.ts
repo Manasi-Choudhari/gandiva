@@ -436,7 +436,10 @@ export async function runChain(chain: Chain, input: Record<string, unknown>, dep
         tally();
         continue;
       }
-      const ranked = all.filter((s) => s.verification === "verified" && s.id !== chain.serviceId && !isChainLike(s.id) && keyOf(s) === step.key);
+      // The seller chose this step's MCP tool by name, and any other tool with the same schema may do the opposite.
+      const named = all.find((s) => s.id === step.serviceId);
+      const sameJob = (s: Service) => (s.access || named?.access ? s.id === step.serviceId : keyOf(s) === step.key);
+      const ranked = all.filter((s) => s.verification === "verified" && s.id !== chain.serviceId && !isChainLike(s.id) && sameJob(s));
       if (!ranked.length) throw new ServiceError(`step ${n}: no verified seller for ${step.serviceId}'s job is listed right now`, 503);
       let callInput: Record<string, unknown>;
       try {

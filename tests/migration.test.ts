@@ -47,6 +47,29 @@ describe("db migration from the pre-'unconfirmed' ledger schema", () => {
     }
   });
 
+  it("adds the access column to MCP tools listed before hints were kept, as unknown", async () => {
+    const path = join(dir, "old-mcp.db");
+    const old = new Database(path);
+    old.exec(`
+      CREATE TABLE mcp_sellers (
+        service_id TEXT PRIMARY KEY, owner TEXT NOT NULL, server_id TEXT NOT NULL, url TEXT NOT NULL, token_enc TEXT,
+        tool_name TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO mcp_sellers (service_id, owner, server_id, url, tool_name) VALUES ('hf-search', '0xabc', 'hf', 'https://example.com/mcp', 'search');
+    `);
+    old.close();
+
+    vi.resetModules();
+    process.env.DB_PATH = path;
+    const { db } = await import("../src/db.js");
+    try {
+      expect(db.prepare("SELECT service_id, access FROM mcp_sellers").all()).toEqual([{ service_id: "hf-search", access: "unknown" }]);
+    } finally {
+      db.close();
+      process.env.DB_PATH = ":memory:";
+    }
+  });
+
   it("adds the verification columns to listings created before probing, keeping them", async () => {
     const path = join(dir, "old-services.db");
     const old = new Database(path);

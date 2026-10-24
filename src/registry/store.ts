@@ -38,6 +38,9 @@ export type ServiceInput = z.infer<typeof serviceInput>;
 export const VERIFICATIONS = ["verified", "mismatch", "unchecked"] as const;
 export type Verification = (typeof VERIFICATIONS)[number];
 
+/** What an MCP tool's own server says it does. "unknown" is common: the hints are optional. */
+export type ToolAccess = "read" | "write" | "unknown";
+
 export interface Service {
   id: string;
   name: string;
@@ -55,6 +58,8 @@ export interface Service {
   verification: Verification;
   verificationNote: string;
   verifiedAt: string | null;
+  /** MCP tools only. A listing with this field is one tool on a seller's server, never a substitute for another listing. */
+  access?: ToolAccess;
 }
 
 export interface Reputation {
@@ -87,7 +92,15 @@ const rowToService = (r: any): Service => ({
   verification: r.verification,
   verificationNote: r.verification_note,
   verifiedAt: r.verified_at,
+  ...(r.tool_access ? { access: r.tool_access } : {}),
 });
+
+const SELECT_SERVICES = "SELECT services.*, mcp_sellers.access AS tool_access FROM services LEFT JOIN mcp_sellers ON mcp_sellers.service_id = services.id";
+
+/** Buyer agents never choose a tool whose server says it changes data. A buyer can still call it by name. */
+export const agentMayPick = (s: Service) => s.access !== "write";
+/** A pick by category or input shape alone cannot tell what a tool does, so an MCP tool must say it only reads. */
+export const blindMayPick = (s: Service) => s.access === undefined || s.access === "read";
 
 export const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 64);
 
@@ -167,7 +180,7 @@ export function registerForWallet(input: unknown, wallet: string, opts: { payTo?
 }
 
 export function listByOwner(wallet: string): Service[] {
-  return db.prepare("SELECT * FROM services WHERE owner = ? ORDER BY created_at DESC, id").all(walletOwner(wallet)).map(rowToService);
+  return db.prepare(`${SELECT_SERVICES} WHERE services.owner = ? ORDER BY services.created_at DESC, services.id`).all(walletOwner(wallet)).map(rowToService);
 }
 
 /** Removes a listing only if this wallet owns it. */
@@ -187,11 +200,11 @@ export const deleteService = db.transaction((id: string) => {
 });
 
 export function listServices(): Service[] {
-  return db.prepare("SELECT * FROM services").all().map(rowToService);
+  return db.prepare(SELECT_SERVICES).all().map(rowToService);
 }
 
 export function getService(id: string): Service | undefined {
-  const r = db.prepare("SELECT * FROM services WHERE id = ?").get(id);
+  const r = db.prepare(`${SELECT_SERVICES} WHERE services.id = ?`).get(id);
   return r ? rowToService(r) : undefined;
 }
 
@@ -264,7 +277,7 @@ export function searchServices(q: { category?: string; maxPrice?: string; sort?:
     where.push("category = ?");
     params.push(q.category);
   }
-  const rows = db.prepare(`SELECT * FROM services ${where.length ? "WHERE " + where.join(" AND ") : ""}`).all(...params);
+  const rows = db.prepare(`${SELECT_SERVICES} ${where.length ? "WHERE " + where.join(" AND ") : ""}`).all(...params);
   let list = rows.map(rowToService).map((s) => ({ ...s, reputation: reputationFor(s.id) }));
   if (q.maxPrice) {
     const max = BigInt(q.maxPrice);

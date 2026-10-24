@@ -77,17 +77,17 @@ export function ServiceCard({
             <div className="font-mono text-sm font-medium">{service.name}</div>
             <div className="flex shrink-0 flex-wrap justify-end gap-1">
               {service.kind ? <KindBadge kind={service.kind} /> : null}
-              {service.access === "write" ? (
-                <span className="rounded border border-warn/40 bg-warn/15 px-1.5 py-0.5 font-mono text-[11px] text-warn" title="This tool changes data on the seller's server. Buyer agents never pick it by themselves.">
-                  changes data
-                </span>
-              ) : null}
               <CategoryBadge category={service.category} />
             </div>
           </div>
           <div className="text-xs text-muted-foreground">
             {service.description || "No description."}
           </div>
+          {service.access === "write" ? (
+            <div className="rounded-md border border-warn/30 bg-warn/10 px-2 py-1 text-[11px] text-warn">
+              Changes data on the seller&apos;s server. Buyer agents never pick it by themselves.
+            </div>
+          ) : null}
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           <div className="flex items-baseline gap-1">

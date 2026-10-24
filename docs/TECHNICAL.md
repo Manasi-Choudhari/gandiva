@@ -88,6 +88,19 @@ Credibility breaks ties in ranking: after reputation and price, before latency. 
 
 A seller can bond testnet USDC in `SellerStakeV2`. If it is paid and returns junk, 2 of 3 independent verifiers can refund that buyer from the bond: at most 0.10 USDC per call, after a 30 minute window in which they can still veto it. No single key can take a bond, and the relayer that pays the gas has no powers; USDC fees from sellers repay it. Slashing rests on receipts the seller signs (`X-Gandiva-Receipt`). Only the built-in sellers and outside sellers that add receipts are slashable; hosted LLM agents, MCP-server listings and agent chains get no receipts yet. How a slash works, the receipt format, verifier setup and the runbook (rotate a verifier, refill the relayer, clear a stuck claim) are in **[STAKE.md](STAKE.md)**.
 
+## Selling an MCP server
+
+The Sell tab turns tools on a seller's MCP server into paid listings (`src/mcpseller/`). A buyer pays the seller's wallet, Gandiva calls the tool with the seller's stored token, and a tool that fails or returns nothing is not charged.
+
+- **Picking and pricing:** "Load tools" reads the server for free. The seller ticks up to 20 tools and prices each one, within the limit of 20 listings per wallet. Saving again applies the new picks: a tool that is unticked, or that the server dropped, leaves the marketplace. One save is one database transaction, so a save that lists nothing changes nothing.
+- **Tools that change data:** a buyer who pays can run a listed tool with the seller's token, so what the server says about each tool is shown as read only, changes data or not declared. Tools marked as changing data start unticked with a warning, and on a refresh every new tool starts unticked. These hints are optional and come from the seller's own server, so "not declared" proves nothing. They help the seller choose. They are not a safety check.
+- **Free test calls:** `POST /registry/mine/mcp-servers/test` runs one tool for the signed-in seller, limited to 20 calls an hour. Input gets the same schema check as a paid call. Nothing is paid or recorded, but the tool really runs, so a tool that changes data changes it.
+- **Tokens:** bearer tokens are stored encrypted and never returned. A saved token is only reused for the exact URL it was saved with, including by test calls and when Refresh moves a group to a new URL.
+- **Groups:** a server's tools are listed under one group name. A second server cannot take over a group by sharing its name. Only Refresh can move a group to a new URL. `DELETE /registry/mine/mcp-servers/:serverId` removes the whole group and its token.
+- **Connecting:** Gandiva tries Streamable HTTP first. If the server answers 400, 404 or 405 it reconnects over the older SSE transport, as the MCP spec describes. Only connecting is retried, so a paid tool call never runs twice. The URL must be public https, it is checked again on every call, redirects are refused, and the timeout covers connecting as well as the call.
+
+Not supported: servers that only allow a browser sign-in (OAuth), which get a clear error, and stdio servers. Stdio would mean running a seller's command on our machine, so it will not be added. A seller with a local server can run a bridge that exposes it over https.
+
 ## Seller comparison: why one seller is picked
 
 On the Marketplace, **Compare** on any card opens a dashboard of the sellers the buyer treats as substitutes for that job (same input and output schema). It shows:

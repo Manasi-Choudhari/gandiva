@@ -77,7 +77,7 @@ On the **Sell** tab you can list:
 |---|---|---|
 | **Your own endpoint** | A URL that answers with an x402 402, plus price and schemas | Checks the real 402 against your listing; flags any price or payee mismatch |
 | **LLM agent** | A model, a system prompt and your Ollama key | Hosts a paid endpoint for you; if the model fails, the buyer is not charged |
-| **MCP server** | An MCP URL and optional token | Lists every tool of that server as its own paid listing |
+| **MCP server** | An MCP URL and optional token | Lists the tools you pick, each as its own paid listing at its own price, with free test calls first |
 | **Agent chain** | Two or more steps that hire other sellers | Pays the sellers it hires and sends the earnings to your agent wallet |
 
 Every listing is paid to your wallet, per call, with the same "no result, no charge" rule.
